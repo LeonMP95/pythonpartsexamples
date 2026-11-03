@@ -1,0 +1,14 @@
+# Eforturi de calcul pentru stâlpi - exemplu
+# Unități: kN, kNm. N > 0 compresiune. Tip: FUND = grupare fundamentală, SEISM = grupare seismică
+# Mx rotește în jurul axei X (solicită latura h), My rotește în jurul axei Y (solicită latura b)
+# Momentele seismice trebuie să fie cele de calcul (inclusiv calculul la capacitate, dacă este cazul)
+Stalp;Combinatie;Tip;N;Mx_sus;My_sus;Mx_jos;My_jos;Vx;Vy
+S1;GF1;FUND;2450;35;20;-60;-25;30;45
+S1;GF2;FUND;2100;55;45;-80;-60;40;50
+S1;GS1+X;SEISM;1650;90;210;-120;-290;160;70
+S1;GS1-X;SEISM;1350;-80;-200;110;280;155;65
+S1;GS1+Y;SEISM;1700;210;80;-300;-110;60;165
+S1;GS1-Y;SEISM;1300;-200;-70;280;100;55;160
+S2;GF1;FUND;1200;20;10;-30;-15;15;20
+S2;GS1+X;SEISM;850;40;120;-60;-160;90;35
+S2;GS1+Y;SEISM;900;120;40;-170;-60;30;95
