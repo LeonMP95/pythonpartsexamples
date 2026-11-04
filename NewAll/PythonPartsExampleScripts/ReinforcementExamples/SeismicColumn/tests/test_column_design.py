@@ -1,6 +1,6 @@
 """Teste pentru modulul de calcul (rulează fără Allplan)
 
-    cd PythonPartsExampleScripts
+    cd NewAll/PythonPartsExampleScripts
     python -m unittest discover -s ReinforcementExamples/SeismicColumn/tests -t .
 """
 

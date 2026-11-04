@@ -17,7 +17,7 @@ stâlp dreptunghiular din beton armat și modelează armătura în Allplan:
 | `SeismicColumn.py` | Scriptul PythonPart: geometrie și armătură în Allplan |
 | `EforturiStalpi_Exemplu.csv` | Fișier de eforturi exemplu (stâlpii S1, S2) |
 | `tests/test_column_design.py` | Teste unitare pentru calcul și citirea fișierului |
-| `Library/.../ReinforcementExamples/SeismicColumn/SeismicColumn.pyp` | Paleta de proprietăți |
+| `NewAll/Library/.../ReinforcementExamples/SeismicColumn/SeismicColumn.pyp` | Paleta de proprietăți |
 
 În Allplan: **Library → Private → Examples → PythonParts → ReinforcementExamples → SeismicColumn**.
 
@@ -79,6 +79,6 @@ Toate valorile din P100 sunt grupate în `SeismicRules` (`P100_DCH`, `P100_DCM`)
 ## Teste
 
 ```
-cd PythonPartsExampleScripts
+cd NewAll/PythonPartsExampleScripts
 python -m unittest discover -s ReinforcementExamples/SeismicColumn/tests -t .
 ```
