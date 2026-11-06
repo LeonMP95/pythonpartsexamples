@@ -18,7 +18,6 @@ import os
 
 from typing import TYPE_CHECKING
 
-import NemAll_Python_BaseElements as AllplanBaseElements
 import NemAll_Python_Geometry as AllplanGeo
 import NemAll_Python_Reinforcement as AllplanReinf
 import NemAll_Python_Utility as AllplanUtil
