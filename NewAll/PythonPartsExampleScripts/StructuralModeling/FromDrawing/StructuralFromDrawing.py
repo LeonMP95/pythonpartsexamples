@@ -156,7 +156,7 @@ def format_report(level_name: str, drawing: Drawing2D, model: StructuralModel, c
     """Raportul final: rezumatul modelului, elementele create și toate avertismentele"""
     created  = ", ".join(f"{count} {name}" for name, count in creation.counts.items())
     warnings = [*drawing.warnings, *model.warnings, *creation.warnings]
-    lines    = [f"Etaj {level_name}: {model.summary()}", f"Create în Allplan: {created}"]
+    lines    = [f"{level_name}: {model.summary()}", f"Create în Allplan: {created}"]
 
     if warnings:
         lines.append("Avertismente:")
@@ -204,11 +204,16 @@ class StructuralFromDrawingInteractor(BaseInteractor):
         """documentul de lucru"""
         return self.coord_input.GetInputViewDocument()
 
-    def start_input(self):
-        """Selecția elementelor 2D (SelectDrawingGeometryForPythonPart.py:105-113) sau, pentru DXF, doar paleta"""
-        if self.post_element_selection is not None:
-            AllplanIFW.InputFunctionStarter.RemoveFunction()            # MultiSelection.py:237-238
-            self.post_element_selection = None
+    def start_input(self, remove_running_selection: bool = False):
+        """Selecția elementelor 2D (SelectDrawingGeometryForPythonPart.py:105-113) sau, pentru DXF, doar paleta
+
+        Args:
+            remove_running_selection: oprește întâi selecția în curs (MultiSelection.py:237-238)
+        """
+        if remove_running_selection and self.post_element_selection is not None:
+            AllplanIFW.InputFunctionStarter.RemoveFunction()
+
+        self.post_element_selection = None
 
         if read_palette(self.build_ele).source == SOURCE_DXF:
             self.coord_input.InitFirstElementInput(
@@ -310,7 +315,7 @@ class StructuralFromDrawingInteractor(BaseInteractor):
 
         self.drawing          = None
         self.preview_elements = []
-        self.start_input()
+        self.start_input(remove_running_selection = True)
 
     def modify_element_property(self, page: int, name: str, value: Any):
         """Schimbare în paletă: actualizează previzualizarea"""
@@ -318,7 +323,7 @@ class StructuralFromDrawingInteractor(BaseInteractor):
 
         if name == "Source":
             self.drawing = None
-            self.start_input()
+            self.start_input(remove_running_selection = True)
 
         if name in DXF_PARAMETERS and read_palette(self.build_ele).source == SOURCE_DXF:
             self.load_dxf_for_preview()

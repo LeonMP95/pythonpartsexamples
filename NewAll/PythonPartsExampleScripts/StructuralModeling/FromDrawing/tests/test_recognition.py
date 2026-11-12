@@ -239,6 +239,89 @@ class TestWalls(unittest.TestCase, AssertMixin):
         self.assertTrue(all(abs(w.thickness - 250) < TOL_MM for w in model.walls))
 
 
+class TestWallJunctions(unittest.TestCase, AssertMixin):
+
+    def test_ring_of_walls_axes_close_at_corners(self):
+        model = run(polylines = [Polyline2D(rect(0, 0, 6000, 4000), True, WALL),
+                                 Polyline2D(rect(250, 250, 5750, 3750), True, WALL)])
+
+        self.assertEqual(len(model.walls), 4)
+        self.assertEqual(model.warnings, [])
+        self.assertWall(model.walls[0], (125, 3875), (5875, 3875), 250)
+        self.assertWall(model.walls[1], (125, 125), (125, 3875), 250)
+        self.assertWall(model.walls[2], (5875, 125), (5875, 3875), 250)
+        self.assertWall(model.walls[3], (125, 125), (5875, 125), 250)
+
+    def test_four_overlapping_rectangles_close_at_corners(self):
+        polys = [Polyline2D(r, True, WALL) for r in (rect(0, 3750, 6000, 4000), rect(0, 0, 6000, 250),
+                                                     rect(0, 0, 250, 4000), rect(5750, 0, 6000, 4000))]
+        model = run(polylines = polys)
+
+        self.assertEqual(len(model.walls), 4)
+        self.assertEqual(model.warnings, [])
+        self.assertWall(model.walls[0], (125, 3875), (5875, 3875), 250)
+        self.assertWall(model.walls[3], (125, 125), (5875, 125), 250)
+
+    def test_l_shaped_closed_polyline_gives_l_without_warnings(self):
+        l_shape = ((0, 0), (4000, 0), (4000, 250), (250, 250), (250, 3000), (0, 3000))
+        model   = run(polylines = [Polyline2D(l_shape, True, WALL)])
+
+        self.assertEqual(model.warnings, [])
+        self.assertWall(model.walls[0], (125, 125), (125, 3000), 250)
+        self.assertWall(model.walls[1], (125, 125), (4000, 125), 250)
+
+    def test_t_junction_stem_reaches_through_wall_axis(self):
+        model = run(segments = [seg((0, 250), (6000, 250)),                       # fața continuă
+                                seg((0, 0), (2875, 0)), seg((3125, 0), (6000, 0)), # fața ruptă de nod
+                                seg((2875, 0), (2875, -3000)), seg((3125, 0), (3125, -3000)),
+                                seg((2875, -3000), (3125, -3000)),                 # capete închise
+                                seg((0, 0), (0, 250)), seg((6000, 0), (6000, 250))])
+
+        self.assertEqual(model.warnings, [])
+        self.assertEqual(len(model.walls), 2)
+        self.assertWall(model.walls[0], (0, 125), (6000, 125), 250)
+        self.assertWall(model.walls[1], (3000, -3000), (3000, 125), 250)
+
+    def test_wall_with_closed_ends_has_no_warnings(self):
+        model = run(segments = [seg((0, 0), (5000, 0)), seg((0, 250), (5000, 250)),
+                                seg((0, 0), (0, 250)), seg((5000, 252), (5000, -1))])
+
+        self.assertEqual(len(model.walls), 1)
+        self.assertEqual(model.warnings, [])
+
+    def test_end_line_of_wrong_length_still_warns(self):
+        model = run(segments = [seg((0, 0), (5000, 0)), seg((0, 250), (5000, 250)),
+                                seg((-200, -300), (-200, 300))])
+
+        self.assertEqual(len(model.walls), 1)
+        self.assertEqual(len(model.warnings), 1)
+        self.assertIn("(-200, -300)", model.warnings[0])
+
+    def test_continuous_face_with_door_in_opposite_face_gives_two_walls(self):
+        model = run(segments = [seg((0, 250), (5000, 250)),
+                                seg((0, 0), (2000, 0)), seg((2900, 0), (5000, 0))])
+
+        self.assertEqual(model.warnings, [])
+        self.assertEqual(len(model.walls), 2)
+        self.assertWall(model.walls[0], (0, 125), (2000, 125), 250)
+        self.assertWall(model.walls[1], (2900, 125), (5000, 125), 250)
+
+    def test_continuous_face_with_touching_opposite_pieces_gives_one_wall(self):
+        model = run(segments = [seg((0, 250), (5000, 250)),
+                                seg((0, 0), (2000, 0)), seg((2000, 0), (5000, 0))])
+
+        self.assertEqual(model.warnings, [])
+        self.assertEqual(len(model.walls), 1)
+        self.assertWall(model.walls[0], (0, 125), (5000, 125), 250)
+
+    def test_crossing_walls_are_not_modified(self):
+        model = run(polylines = [Polyline2D(rect(0, 1000, 4000, 1250), True, WALL),
+                                 Polyline2D(rect(1500, 0, 1750, 3000), True, WALL)])
+
+        self.assertWall(model.walls[0], (1625, 0), (1625, 3000), 250)    # mijloc la y = 1500
+        self.assertWall(model.walls[1], (0, 1125), (4000, 1125), 250)
+
+
 class TestBeams(unittest.TestCase, AssertMixin):
 
     def test_axis_segment_creates_beam_with_default_section(self):

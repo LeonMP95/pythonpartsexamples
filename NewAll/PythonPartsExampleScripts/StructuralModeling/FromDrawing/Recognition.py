@@ -482,9 +482,31 @@ def _face_pair(face_a: Segment2D, face_b: Segment2D, rules: RecognitionRules) ->
     return _WallAxis(*_canonical_axis(start, end, rules.point_tolerance), thickness)
 
 
+def _face_interval(face: Segment2D, axis: _WallAxis) -> tuple[float, float]:
+    """porțiunea feței folosită de un perete: proiecția capetelor axei pe direcția feței [mm]"""
+    params = sorted(_param_along(pnt, face.start, face.end) for pnt in (axis.start, axis.end))
+    return params[0], params[1]
+
+
+def _param_along(pnt: Point2, p_a: Point2, p_b: Point2) -> float:
+    """coordonata proiecției lui pnt pe dreapta p_a -> p_b, măsurată de la p_a [mm]"""
+    length = _dist(p_a, p_b)
+    return ((pnt[0] - p_a[0]) * (p_b[0] - p_a[0]) + (pnt[1] - p_a[1]) * (p_b[1] - p_a[1])) / length
+
+
+def _interval_free(used: list[tuple[float, float]], interval: tuple[float, float], tolerance: float) -> bool:
+    """True dacă intervalul nu se suprapune (cu mai mult de tolerance [mm]) cu niciun interval folosit"""
+    return all(min(end, interval[1]) - max(start, interval[0]) <= tolerance for start, end in used)
+
+
 def _pair_faces(faces: list[Segment2D], rules: RecognitionRules) -> tuple[list[_WallAxis], list[Segment2D]]:
-    """Împerechează fețele de pe un layer: fiecare față în cel mult o pereche, în ordinea
-    crescătoare a distanței dintre fețe (fața opusă cea mai apropiată). Returnează pereții și fețele rămase."""
+    """Împerechează fețele de pe un layer, în ordinea crescătoare a distanței dintre fețe
+    (fața opusă cea mai apropiată)
+
+    Fiecare porțiune a unei fețe se folosește în cel mult o pereche: o față lungă poate forma
+    perechi cu mai multe segmente de pe partea opusă, pe porțiuni care nu se suprapun (în point_tolerance).
+    Returnează pereții și fețele nefolosite deloc.
+    """
     candidates = []
 
     for idx_a in range(len(faces)):
@@ -494,12 +516,17 @@ def _pair_faces(faces: list[Segment2D], rules: RecognitionRules) -> tuple[list[_
                 candidates.append((axis.thickness, idx_a, idx_b, axis))
 
     candidates.sort(key = lambda cand: cand[:3])
-    used: set[int] = set()
+    used: dict[int, list[tuple[float, float]]] = {}
     walls = []
 
     for _, idx_a, idx_b, axis in candidates:
-        if idx_a not in used and idx_b not in used:
-            used.update((idx_a, idx_b))
+        portion_a = _face_interval(faces[idx_a], axis)
+        portion_b = _face_interval(faces[idx_b], axis)
+
+        if (_interval_free(used.get(idx_a, []), portion_a, rules.point_tolerance)
+                and _interval_free(used.get(idx_b, []), portion_b, rules.point_tolerance)):
+            used.setdefault(idx_a, []).append(portion_a)
+            used.setdefault(idx_b, []).append(portion_b)
             walls.append(axis)
 
     return walls, [face for idx, face in enumerate(faces) if idx not in used]
@@ -571,17 +598,149 @@ def _merge_walls(walls: list[_WallAxis], rules: RecognitionRules) -> list[_WallA
     return items
 
 
-def _recognize_walls(drawing: Drawing2D, layers: set[str], rules: RecognitionRules,
-                     warnings: list[str]) -> list[_WallAxis]:
-    """Regula 2 (pereți)
+def _parallel(wall_a: _WallAxis, wall_b: _WallAxis, rules: RecognitionRules) -> bool:
+    return _angle_diff_deg(_direction_deg(wall_a.start, wall_a.end),
+                           _direction_deg(wall_b.start, wall_b.end)) <= rules.parallel_tolerance_deg
 
-    -   contururile dreptunghiulare fără goluri, cu latura scurtă în [wall_min_thickness,
-        wall_max_thickness] [mm], devin pereți direct (_wall_from_rectangle);
-    -   laturile celorlalte contururi (de ex. conturul exterior și cel interior al unui inel de pereți), polilinii deschise și segmentele libere sunt fețe care se
-        împerechează pe fiecare layer (_pair_faces); fețele fără pereche devin avertismente;
-    -   pereții coliniari consecutivi se unesc (_merge_walls).
+
+def _gap_filled_by_wall(wall_a: _WallAxis, wall_b: _WallAxis, others: list[_WallAxis],
+                        rules: RecognitionRules) -> bool:
+    """True dacă golul dintre doi pereți coliniari este ocupat de capătul unui perete neparalel
+    (nod în T cu fața continuă): golul <= grosimea acelui perete + 2 point_tolerance, iar capătul lui
+    se proiectează în gol și e la cel mult grosime/2 + point_tolerance de axă [mm]"""
+    tol = rules.point_tolerance
+    params_b = sorted(_param_along(pnt, wall_a.start, wall_a.end) for pnt in (wall_b.start, wall_b.end))
+
+    if params_b[0] > wall_a.length + tol:
+        gap = (wall_a.length, params_b[0])
+    elif params_b[1] < -tol:
+        gap = (params_b[1], 0.0)
+    else:
+        return False
+
+    for other in others:
+        if _parallel(other, wall_a, rules) or gap[1] - gap[0] > other.thickness + 2 * tol:
+            continue
+
+        for end in (other.start, other.end):
+            if (gap[0] - tol <= _param_along(end, wall_a.start, wall_a.end) <= gap[1] + tol
+                    and _line_distance(end, wall_a.start, wall_a.end) <= wall_a.thickness / 2 + tol):
+                return True
+
+    return False
+
+
+def _bridge_t_gaps(walls: list[_WallAxis], rules: RecognitionRules) -> list[_WallAxis]:
+    """Unește pereții coliniari (aceeași grosime și axă în point_tolerance) separați doar de capătul
+    unui perete perpendicular (_gap_filled_by_wall). Golurile de uși rămân goluri."""
+    items = list(walls)
+    tol   = rules.point_tolerance
+
+    for idx_a, idx_b in ((i, j) for i in range(len(items)) for j in range(i + 1, len(items))):
+        wall_a, wall_b = items[idx_a], items[idx_b]
+
+        if (abs(wall_a.thickness - wall_b.thickness) <= tol and _parallel(wall_a, wall_b, rules)
+                and _line_distance(wall_b.start, wall_a.start, wall_a.end) <= tol
+                and _line_distance(wall_b.end, wall_a.start, wall_a.end) <= tol
+                and _gap_filled_by_wall(wall_a, wall_b, items[:idx_a] + items[idx_a + 1:idx_b] + items[idx_b + 1:],
+                                        rules)):
+            ends = sorted((wall_a.start, wall_a.end, wall_b.start, wall_b.end),
+                          key = lambda pnt: _param_along(pnt, wall_a.start, wall_a.end))
+            joined = _WallAxis(*_canonical_axis(ends[0], ends[-1], tol), (wall_a.thickness + wall_b.thickness) / 2)
+            rest   = [wall for idx, wall in enumerate(items) if idx not in (idx_a, idx_b)]
+            return _bridge_t_gaps([joined, *rest], rules)
+
+    return items
+
+
+def _axis_intersection(wall_a: _WallAxis, wall_b: _WallAxis) -> Point2 | None:
+    """punctul de intersecție al dreptelor-suport ale axelor sau None dacă sunt paralele"""
+    d_a = (wall_a.end[0] - wall_a.start[0], wall_a.end[1] - wall_a.start[1])
+    d_b = (wall_b.end[0] - wall_b.start[0], wall_b.end[1] - wall_b.start[1])
+    cross = d_a[0] * d_b[1] - d_a[1] * d_b[0]
+
+    if abs(cross) < _EPS:
+        return None
+
+    q_x, q_y = wall_b.start[0] - wall_a.start[0], wall_b.start[1] - wall_a.start[1]
+    par = (q_x * d_b[1] - q_y * d_b[0]) / cross
+    return wall_a.start[0] + par * d_a[0], wall_a.start[1] + par * d_a[1]
+
+
+def _join_corners(walls: list[_WallAxis], rules: RecognitionRules) -> list[_WallAxis]:
+    """Noduri în L și T: axele se prelungesc / scurtează până la intersecție
+
+    -   L: capetele cele mai apropiate ale doi pereți neparaleli sunt la cel mult max(grosimi) [mm]
+        de intersecția axelor → ambele capete se mută în intersecție;
+    -   T: capătul unui perete este la cel mult grosimea celuilalt / 2 + point_tolerance [mm] de axa
+        celuilalt și se proiectează în interiorul lungimii lui → capătul se mută pe axa celuilalt.
+    Fiecare capăt se mută cel mult o dată (L are prioritate).
     """
-    ent   = _collect(drawing, layers, rules.point_tolerance, _LABEL["wall"], warnings)
+    tol   = rules.point_tolerance
+    ends  = [[wall.start, wall.end] for wall in walls]
+    fixed: set[tuple[int, int]] = set()
+    pairs = [(i, j) for i in range(len(walls)) for j in range(len(walls))
+             if i != j and not _parallel(walls[i], walls[j], rules)]
+
+    for idx_a, idx_b in (pair for pair in pairs if pair[0] < pair[1]):
+        cross = _axis_intersection(walls[idx_a], walls[idx_b])
+
+        if cross is None:
+            continue
+
+        end_a = min((0, 1), key = lambda k: _dist(ends[idx_a][k], cross))
+        end_b = min((0, 1), key = lambda k: _dist(ends[idx_b][k], cross))
+        limit = max(walls[idx_a].thickness, walls[idx_b].thickness)
+
+        if ((idx_a, end_a) not in fixed and (idx_b, end_b) not in fixed
+                and _dist(ends[idx_a][end_a], cross) <= limit and _dist(ends[idx_b][end_b], cross) <= limit):
+            ends[idx_a][end_a] = ends[idx_b][end_b] = cross
+            fixed.update(((idx_a, end_a), (idx_b, end_b)))
+
+    for idx_a, idx_b in pairs:
+        host  = walls[idx_b]
+        reach = host.thickness / 2 + tol
+
+        for k in (0, 1):
+            end = ends[idx_a][k]
+
+            cross = _axis_intersection(walls[idx_a], host)
+
+            if (cross is not None and (idx_a, k) not in fixed and _line_distance(end, host.start, host.end) <= reach
+                    and -tol <= _param_along(end, host.start, host.end) <= host.length + tol):
+                ends[idx_a][k] = cross
+                fixed.add((idx_a, k))
+
+    return [_WallAxis(*_canonical_axis(start, end, tol), wall.thickness)
+            for (start, end), wall in zip(ends, walls)]
+
+
+def _is_end_cap(face: Segment2D, wall: _WallAxis, rules: RecognitionRules) -> bool:
+    """True dacă fața închide capătul peretelui: perpendiculară pe axă (± parallel_tolerance_deg),
+    lungime = grosimea ± point_tolerance, mijlocul în capătul axei (în point_tolerance) [mm]"""
+    tol = rules.point_tolerance
+    angle = _angle_diff_deg(_direction_deg(face.start, face.end), _direction_deg(wall.start, wall.end))
+
+    return (abs(90.0 - angle) <= rules.parallel_tolerance_deg and abs(face.length - wall.thickness) <= tol
+            and min(_dist(_mid(face.start, face.end), end) for end in (wall.start, wall.end)) <= tol)
+
+
+def _wall_outline(wall: _WallAxis) -> Ring:
+    """conturul dreptunghiular al peretelui (axă ± grosime / 2)"""
+    n_x = -(wall.end[1] - wall.start[1]) / wall.length * wall.thickness / 2
+    n_y = (wall.end[0] - wall.start[0]) / wall.length * wall.thickness / 2
+    return ((wall.start[0] + n_x, wall.start[1] + n_y), (wall.end[0] + n_x, wall.end[1] + n_y),
+            (wall.end[0] - n_x, wall.end[1] - n_y), (wall.start[0] - n_x, wall.start[1] - n_y))
+
+
+def _inside_wall(face: Segment2D, wall: _WallAxis, tolerance: float) -> bool:
+    """True dacă fața este complet în conturul peretelui lărgit cu tolerance [mm] (zonă de nod)"""
+    outline = _wall_outline(wall)
+    return all(_position(pnt, outline, tolerance) >= 0 for pnt in (face.start, face.end))
+
+
+def _wall_faces(ent: _Entities, rules: RecognitionRules, warnings: list[str]) -> tuple[list[_WallAxis], list[Segment2D]]:
+    """pereții din dreptunghiuri și fețele de împerecheat (segmente, polilinii, laturile altor contururi)"""
     walls = []
     faces = list(ent.segments) + [seg for pts, layer in ent.paths for seg in _path_edges(pts, layer)]
 
@@ -595,15 +754,42 @@ def _recognize_walls(drawing: Drawing2D, layers: set[str], rules: RecognitionRul
             for ring in (contour.points, *contour.holes):
                 faces.extend(_ring_edges(ring, contour.layer))
 
-    for layer in sorted({face.layer for face in faces}):
-        paired, unpaired = _pair_faces(sorted((f for f in faces if f.layer == layer), key = _segment_key), rules)
-        walls.extend(paired)
+    return walls, faces
 
-        for face in unpaired:
-            warnings.append(f"Perete: linie fără față opusă pe layerul '{layer}', de la {_fmt(face.start)} "
+
+def _recognize_walls(drawing: Drawing2D, layers: set[str], rules: RecognitionRules,
+                     warnings: list[str]) -> list[_WallAxis]:
+    """Regula 2 (pereți)
+
+    -   contururile dreptunghiulare fără goluri, cu latura scurtă în [wall_min_thickness,
+        wall_max_thickness] [mm], devin pereți direct (_wall_from_rectangle);
+    -   laturile celorlalte contururi (de ex. conturul exterior și cel interior al unui inel de pereți),
+        poliliniile deschise și segmentele libere sunt fețe care se împerechează pe fiecare layer
+        (_pair_faces);
+    -   pereții coliniari consecutivi se unesc (_merge_walls), la fel cei separați doar de capătul
+        unui perete în T (_bridge_t_gaps); apoi axele se închid în nodurile L și T (_join_corners);
+    -   fețele nefolosite care sunt capete de perete (_is_end_cap) sau se află în zona unui nod
+        (_inside_wall) se consumă fără avertisment; restul devin avertismente.
+    """
+    ent = _collect(drawing, layers, rules.point_tolerance, _LABEL["wall"], warnings)
+    walls, faces = _wall_faces(ent, rules, warnings)
+    unpaired = []
+
+    for layer in sorted({face.layer for face in faces}):
+        paired, rest = _pair_faces(sorted((f for f in faces if f.layer == layer), key = _segment_key), rules)
+        walls.extend(paired)
+        unpaired.extend(rest)
+
+    walls    = _merge_walls(_bridge_t_gaps(_merge_walls(walls, rules), rules), rules)
+    unpaired = [face for face in unpaired if not any(_is_end_cap(face, wall, rules) for wall in walls)]
+    walls    = _join_corners(walls, rules)
+
+    for face in unpaired:
+        if not any(_inside_wall(face, wall, rules.point_tolerance) for wall in walls):
+            warnings.append(f"Perete: linie fără față opusă pe layerul '{face.layer}', de la {_fmt(face.start)} "
                             f"la {_fmt(face.end)} (lungime {face.length:.0f} mm), ignorată.")
 
-    return _merge_walls(walls, rules)
+    return walls
 
 
 # ----------------------------------------------------------------------------------------------
