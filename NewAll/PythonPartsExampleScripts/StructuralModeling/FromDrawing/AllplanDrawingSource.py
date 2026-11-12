@@ -20,6 +20,8 @@ Unitatea internă Allplan este mm, deci coordonatele nu se scalează.
 
 from __future__ import annotations
 
+import math
+
 from collections import Counter
 from typing import Any, Iterable
 
@@ -32,6 +34,9 @@ from StructuralModeling.FromDrawing.Model2D import Drawing2D, Hatch2D, Point2, P
 POINT_TOLERANCE_MM  = 1e-3      # sub această distanță două puncte consecutive sunt identice
 MAX_UNPACK_DEPTH    = 8         # adâncimea maximă de despachetare grupuri / macro-uri
 DIVISION_EPSILON    = 0.0       # ca în GeometryExamples/DivisionPoints.pyp (Epsilon = 0)
+MIN_SEGMENTS_CLOSED = 16        # minimul de segmente pentru o curbă închisă (cerc complet), ca în DxfSource
+MIN_SEGMENTS_OPEN   = 4         # minimul pentru un arc deschis (unghiul la centru nu este citit din Arc2D)
+MAX_SEGMENTS_CURVE  = 10000     # limită de siguranță pe curbă, ca în DxfSource.MAX_SEGMENTS_PER_CURVE
 UNKNOWN_LAYER       = ""
 
 
@@ -48,8 +53,7 @@ def drawing_from_elements(elements             : Iterable[Any],
     Returns:
         planșa 2D, în mm, cu avertismente pentru geometria ignorată
     """
-    if arc_segment_length_mm <= 0:
-        raise ValueError("Lungimea segmentului de discretizare a arcelor trebuie să fie pozitivă")
+    _check_segment_length(arc_segment_length_mm)
 
     collector   = _Collector(document_id, arc_segment_length_mm)
     stack       = [(element, 0) for element in elements]
@@ -94,13 +98,15 @@ def convert_geometry(geo                  : Any,
         return _polyline_from_points([_xy(pnt) for pnt in geo.Points], layer)
 
     if isinstance(geo, AllplanGeo.Arc2D):
-        path = AllplanGeo.Path2D()
-        path += geo
-        points = [_xy(geo.StartPoint), *_division_points(path, arc_segment_length_mm), _xy(geo.EndPoint)]
-        return _polyline_from_points(points, layer)
+        start, end = _xy(geo.StartPoint), _xy(geo.EndPoint)
+        path       = AllplanGeo.Path2D()
+        path      += geo
+        count      = segment_count(AllplanGeo.CalcLength(geo), arc_segment_length_mm, _same(start, end))
+        return _polyline_from_points([start, *_division_points(path, count), end], layer)
 
     if isinstance(geo, AllplanGeo.Path2D):
-        return _polyline_from_points(_division_points(geo, arc_segment_length_mm), layer)
+        count = segment_count(AllplanGeo.CalcLength(geo), arc_segment_length_mm, False)
+        return _polyline_from_points(_division_points(geo, count), layer)
 
     return None
 
@@ -216,9 +222,34 @@ def _dedupe(points: Iterable[Point2]) -> list[Point2]:
     return result
 
 
-def _division_points(path: Any, segment_length_mm: float) -> list[Point2]:
-    """Punctele de discretizare ale unui Path2D, ca în GeometryExamples/DivisionPoints.py:166-168"""
-    division = AllplanGeo.DivisionPoints(path, segment_length_mm, DIVISION_EPSILON)
+def _check_segment_length(segment_length_mm: float):
+    """lungimea segmentului de discretizare: număr finit pozitiv"""
+    if isinstance(segment_length_mm, bool) or not isinstance(segment_length_mm, (int, float)) \
+            or not math.isfinite(segment_length_mm) or segment_length_mm <= 0:
+        raise ValueError(f"Lungimea segmentului de discretizare a arcelor trebuie să fie un număr pozitiv "
+                         f"(primit: {segment_length_mm!r})")
+
+
+def segment_count(length_mm: float, segment_length_mm: float, closed: bool) -> int:
+    """Numărul de segmente al unei curbe: după lungime, cu minim (16 pe curbă închisă) și maxim 10000
+
+    Lungimea curbei vine din AllplanGeo.CalcLength (GeometryExamples/.../CalcLength.py:152).
+    """
+    _check_segment_length(segment_length_mm)
+
+    minimum = MIN_SEGMENTS_CLOSED if closed else MIN_SEGMENTS_OPEN
+
+    if not math.isfinite(length_mm) or length_mm <= 0:
+        return minimum
+
+    return min(max(math.ceil(length_mm / segment_length_mm), minimum), MAX_SEGMENTS_CURVE)
+
+
+def _division_points(path: Any, count: int) -> list[Point2]:
+    """Punctele de împărțire în `count` părți egale (varianta cu număr de diviziuni din
+    GeometryExamples/DivisionPoints.py:163-168). DE VERIFICAT în Allplan dacă include capetele;
+    capetele duble sunt eliminate oricum."""
+    division = AllplanGeo.DivisionPoints(path, int(count), DIVISION_EPSILON)
     return [_xy(pnt) for pnt in division.GetPoints()]
 
 

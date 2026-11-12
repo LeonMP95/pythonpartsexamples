@@ -6,6 +6,7 @@ import importlib.util
 import math
 import os
 import tempfile
+import time
 import unittest
 
 from unittest import mock
@@ -348,7 +349,8 @@ class TestInvalidInput(unittest.TestCase):
 
     def test_invalid_parameters_raise(self):
         path = self.write("plansa.dxf", "0\nEOF\n")
-        for kwargs in ({"unit_to_mm": 0.0}, {"arc_segment_length_mm": -1.0}, {"max_file_size_mb": 0.0}):
+        for kwargs in ({"unit_to_mm": 0.0}, {"arc_segment_length_mm": -1.0}, {"max_file_size_mb": 0.0},
+                       {"max_entities": 0}, {"max_total_points": -5}):
             with self.subTest(kwargs = kwargs), self.assertRaises(DxfSourceError):
                 read_dxf(path, **kwargs)
 

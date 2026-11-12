@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .Model2D import Point2
+from StructuralModeling.FromDrawing.Model2D import Point2
 
 
 class StructuralModelError(ValueError):

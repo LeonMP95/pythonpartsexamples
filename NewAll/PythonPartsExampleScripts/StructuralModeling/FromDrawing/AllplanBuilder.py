@@ -264,10 +264,11 @@ def create_in_document(model: StructuralModel, document: Any, options: BuildOpti
         if not slab.holes:
             continue
 
-        slab_adapters = [ele for ele in created if ele == AllplanEleAdapter.Slab_TypeUUID]   # SlabOpeningsFor3DSolids.py:132
+        slab_adapters = [ele for ele in created if is_slab_adapter(ele)]
 
         if not slab_adapters:
-            report.warnings.append(f"{slab.id}: placa creată nu a fost găsită, golurile nu au fost create")
+            report.warnings.append(f"{slab.id}: placa creată nu a fost găsită printre elementele create "
+                                   f"({created_type_names(created)}), golurile nu au fost create")
             continue
 
         openings = slab_opening_elements(slab, slab_adapters[0].GetModelElementUUID(), document, common_props)
@@ -276,3 +277,23 @@ def create_in_document(model: StructuralModel, document: Any, options: BuildOpti
 
     return report
 
+
+def is_slab_adapter(element: Any) -> bool:
+    """True pentru placă sau placă multistrat (comparația cu _TypeUUID ca în SlabOpeningsFor3DSolids.py:132)
+
+    DE VERIFICAT în Allplan: tipul elementului întors de CreateElements pentru o placă nou creată.
+    """
+    return element == AllplanEleAdapter.Slab_TypeUUID or element == AllplanEleAdapter.MultiSlab_TypeUUID
+
+
+def created_type_names(created: Any) -> str:
+    """Tipurile elementelor create, pentru avertisment (GetTypeName ca în MultiSelection.py:194-196)"""
+    names = []
+
+    for ele in created or []:
+        try:
+            names.append(str(ele.GetElementAdapterType().GetTypeName()))
+        except AttributeError:
+            names.append(type(ele).__name__)
+
+    return "tipuri găsite: " + (", ".join(names) if names else "niciun element")

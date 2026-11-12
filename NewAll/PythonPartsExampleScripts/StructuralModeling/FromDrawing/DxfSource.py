@@ -33,11 +33,16 @@ MIN_OPEN_POINTS_TO_CLOSE   = 4        # 3 vârfuri distincte + punctul repetat
 MIN_SEGMENTS_FULL_CIRCLE   = 16       # număr minim de segmente pentru un cerc complet
 MAX_SEGMENTS_PER_CURVE     = 10000    # limită de siguranță pentru discretizare
 MAX_BLOCK_DEPTH            = 32       # adâncimea maximă a blocurilor imbricate
+DEFAULT_MAX_ENTITIES       = 1_000_000   # entități produse în total, inclusiv din blocuri explodate
+DEFAULT_MAX_TOTAL_POINTS   = 5_000_000   # puncte produse în total
 SPLINE_FRAME_VERTEX_FLAG   = 16       # vertex de control al unei polilinii netezite (se omite)
 HATCH_PATH_EXTERNAL_FLAG   = 1        # cale externă a hașurii
 MAX_ERROR_DETAIL_CHARS     = 200
 
 BASE_LAYER = "0"
+
+TOO_COMPLEX_HINT = ("Planșa DXF este prea complexă: {what}. Izolați layerele structurale "
+                    "(ștergeți sau înghețați restul) și curățați planșa (PURGE), apoi reîncercați.")
 
 INSTALL_HINT = ("Biblioteca Python 'ezdxf' nu este instalată în interpretorul Allplan. "
                 "Instalați-o cu unealta „Install Python Package” din PythonParts SDK "
@@ -57,7 +62,9 @@ class DxfSourceError(ValueError):
 def read_dxf(path                 : str,
              unit_to_mm           : float | None = None,
              max_file_size_mb     : float = 50.0,
-             arc_segment_length_mm: float = 100.0) -> Drawing2D:
+             arc_segment_length_mm: float = 100.0,
+             max_entities         : int   = DEFAULT_MAX_ENTITIES,
+             max_total_points     : int   = DEFAULT_MAX_TOTAL_POINTS) -> Drawing2D:
     """Citește entitățile 2D din modelspace-ul unui fișier DXF.
 
     Args:
@@ -65,16 +72,20 @@ def read_dxf(path                 : str,
         unit_to_mm:            factorul unitate desen -> mm; None = din header ($INSUNITS)
         max_file_size_mb:      mărimea maximă acceptată a fișierului [MB]
         arc_segment_length_mm: lungimea aproximativă a unui segment la discretizarea curbelor [mm]
+        max_entities:          numărul maxim de entități procesate, inclusiv cele din blocuri explodate
+        max_total_points:      numărul maxim de puncte produse în total
 
     Returns:
         planșa 2D, cu coordonatele în mm
 
     Raises:
         DxfSourceError: fișier inexistent / prea mare / extensie greșită / corupt,
-                        ezdxf lipsă sau parametri invalizi
+                        ezdxf lipsă, parametri invalizi sau planșă prea complexă (peste limite)
     """
     _check_positive(max_file_size_mb, "max_file_size_mb")
     _check_positive(arc_segment_length_mm, "arc_segment_length_mm")
+    _check_positive(max_entities, "max_entities")
+    _check_positive(max_total_points, "max_total_points")
 
     if unit_to_mm is not None:
         _check_positive(unit_to_mm, "unit_to_mm")
@@ -86,7 +97,7 @@ def read_dxf(path                 : str,
     warnings: list[str] = []
     factor = unit_to_mm if unit_to_mm is not None else _unit_factor_from_header(doc, warnings)
 
-    collector = _Collector(ezdxf, factor, arc_segment_length_mm / factor)
+    collector = _Collector(ezdxf, factor, arc_segment_length_mm / factor, max_entities, max_total_points)
 
     for entity in doc.modelspace():
         collector.add(entity, None, 0)
@@ -377,6 +388,8 @@ class _Collector:
     ezdxf         : Any
     factor        : float     # unitate desen -> mm
     segment_length: float     # lungimea segmentului de discretizare, în unitatea desenului
+    max_entities  : int       # limită globală de entități (inclusiv din blocuri)
+    max_points    : int       # limită globală de puncte
 
     segments : list[Segment2D]  = field(default_factory = list)
     polylines: list[Polyline2D] = field(default_factory = list)
@@ -384,16 +397,38 @@ class _Collector:
     ignored  : Counter          = field(default_factory = Counter)
     failed   : Counter          = field(default_factory = Counter)
     too_deep : int              = 0
+    cyclic   : Counter          = field(default_factory = Counter)    # blocuri care se inserează pe sine
+    entity_count: int           = 0
+    point_count : int           = 0
+    block_stack : list[str]     = field(default_factory = list)       # blocurile în curs de explodare
 
     def add(self, entity: Any, parent_layer: str | None, depth: int) -> None:
         """Convertește o entitate; erorile de date se numără, nu opresc citirea"""
+        self._count_entities(1)
         layer = _effective_layer(entity.dxf.get("layer", BASE_LAYER), parent_layer)
         kind  = entity.dxftype()
 
         try:
             self._dispatch(entity, kind, layer, depth)
+        except DxfSourceError:
+            raise
         except (self.ezdxf.DXFError, ValueError, TypeError, IndexError, ArithmeticError, AttributeError):
             self.failed[kind] += 1
+
+    def _count_entities(self, count: int) -> None:
+        """Contorizează entitățile produse; eroare peste limita globală"""
+        self.entity_count += count
+
+        if self.entity_count > self.max_entities:
+            raise DxfSourceError(TOO_COMPLEX_HINT.format(
+                what = f"peste {self.max_entities} entități, inclusiv cele din blocurile explodate"))
+
+    def _count_points(self, count: int) -> None:
+        """Contorizează punctele produse; eroare peste limita globală"""
+        self.point_count += count
+
+        if self.point_count > self.max_points:
+            raise DxfSourceError(TOO_COMPLEX_HINT.format(what = f"peste {self.max_points} de puncte"))
 
     def _dispatch(self, entity: Any, kind: str, layer: str, depth: int) -> None:
         """Alege conversia după tipul entității"""
@@ -418,6 +453,7 @@ class _Collector:
         points = _clean_points(_xy((entity.dxf.start, entity.dxf.end)), self.factor)
 
         if len(points) == 2:
+            self._count_points(2)
             self.segments.append(Segment2D(points[0], points[1], layer))
 
     def _add_points(self, points: Iterable[XY], closed: bool, layer: str) -> None:
@@ -425,6 +461,7 @@ class _Collector:
         cleaned, closed = _close_points(_clean_points(points, self.factor), closed)
 
         if len(cleaned) >= 2:
+            self._count_points(len(cleaned))
             self.polylines.append(Polyline2D(tuple(cleaned), closed, layer))
 
     def _add_lwpolyline(self, entity: Any, layer: str) -> None:
@@ -484,6 +521,7 @@ class _Collector:
             ring, _ = _close_points(_clean_points(points, self.factor), True)
 
             if len(ring) >= 3:
+                self._count_points(len(ring))
                 flags.append(path.path_type_flags)
                 rings.append(ring)
 
@@ -492,15 +530,26 @@ class _Collector:
 
     def _add_insert(self, entity: Any, layer: str, depth: int) -> None:
         """INSERT -> entitățile blocului, transformate și explodate recursiv"""
+        name = entity.dxf.name
+
+        if name in self.block_stack:
+            self.cyclic[name] += 1
+            return
+
         if depth >= MAX_BLOCK_DEPTH:
             self.too_deep += 1
             return
 
+        self._count_entities(entity.mcount - 1)     # MINSERT: fiecare copie suplimentară contează
         inserts = entity.multi_insert() if entity.mcount > 1 else (entity,)
+        self.block_stack.append(name)
 
-        for insert in inserts:
-            for child in insert.virtual_entities():
-                self.add(child, layer, depth + 1)
+        try:
+            for insert in inserts:
+                for child in insert.virtual_entities():
+                    self.add(child, layer, depth + 1)
+        finally:
+            self.block_stack.pop()
 
     def drawing(self, warnings: list[str]) -> Drawing2D:
         """Planșa rezultată, cu avertismentele sumare"""
@@ -508,7 +557,7 @@ class _Collector:
         return Drawing2D(tuple(self.segments), tuple(self.polylines), tuple(self.hatches), tuple(all_warnings))
 
     def _summary_warnings(self) -> list[str]:
-        """Avertismente pentru entitățile ignorate, eronate și blocurile prea adânci"""
+        """Avertismente pentru entitățile ignorate, eronate, blocurile ciclice și cele prea adânci"""
         warnings = []
 
         if self.ignored:
@@ -516,6 +565,10 @@ class _Collector:
 
         if self.failed:
             warnings.append("Entități care nu au putut fi citite (date invalide): " + _format_counter(self.failed))
+
+        if self.cyclic:
+            warnings.append("Blocuri care se inserează pe ele însele (direct sau indirect), sărite: "
+                            + _format_counter(self.cyclic))
 
         if self.too_deep:
             warnings.append(f"{self.too_deep} inserări de bloc ignorate: imbricare mai adâncă de {MAX_BLOCK_DEPTH} niveluri.")
