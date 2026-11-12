@@ -1,0 +1,24 @@
+{
+  "description": "Reguli implicite de recunoaștere. Adaptați modelele de layere la convențiile planșelor primite de la arhitect. Modelele folosesc * și ? (fără diferență între litere mari și mici); prima regulă care se potrivește câștigă.",
+  "layers": [
+    {"pattern": "*STALP*",  "element": "column"},
+    {"pattern": "*STÂLP*",  "element": "column"},
+    {"pattern": "*COLUMN*", "element": "column"},
+    {"pattern": "*GRIND*",  "element": "beam"},
+    {"pattern": "*BEAM*",   "element": "beam"},
+    {"pattern": "*PLAC*",   "element": "slab"},
+    {"pattern": "*SLAB*",   "element": "slab"},
+    {"pattern": "*PERE*",   "element": "wall"},
+    {"pattern": "*WALL*",   "element": "wall"}
+  ],
+  "column_min_size": 150,
+  "column_max_size": 2000,
+  "wall_min_thickness": 100,
+  "wall_max_thickness": 800,
+  "wall_min_length": 300,
+  "parallel_tolerance_deg": 1.0,
+  "point_tolerance": 5,
+  "beam_width": 300,
+  "beam_depth": 500,
+  "slab_thickness": 150
+}
