@@ -643,10 +643,33 @@ def _recognize_beams(drawing: Drawing2D, layers: set[str], rules: RecognitionRul
 # Plăci
 # ----------------------------------------------------------------------------------------------
 
-def _contains(outer: Ring, inner: Ring) -> bool:
-    """True dacă toate vârfurile lui inner sunt în interiorul lui outer și inner are aria mai mică"""
-    return (abs(_signed_area(inner)) < abs(_signed_area(outer))
-            and all(_point_in_polygon(pnt, outer) for pnt in inner))
+def _segment_distance(pnt: Point2, p_a: Point2, p_b: Point2) -> float:
+    """distanța de la pnt la segmentul p_a - p_b [mm]"""
+    length_sq = (p_b[0] - p_a[0]) ** 2 + (p_b[1] - p_a[1]) ** 2
+
+    if length_sq < _EPS:
+        return _dist(pnt, p_a)
+
+    par = ((pnt[0] - p_a[0]) * (p_b[0] - p_a[0]) + (pnt[1] - p_a[1]) * (p_b[1] - p_a[1])) / length_sq
+    par = min(1.0, max(0.0, par))
+    return _dist(pnt, (p_a[0] + par * (p_b[0] - p_a[0]), p_a[1] + par * (p_b[1] - p_a[1])))
+
+
+def _position(pnt: Point2, polygon: Ring, tolerance: float) -> int:
+    """poziția punctului față de poligon: 1 = în interior, 0 = pe contur (în tolerance [mm]), -1 = în exterior"""
+    pts = list(polygon)
+
+    if any(_segment_distance(pnt, p_1, p_2) <= tolerance for p_1, p_2 in zip(pts, pts[1:] + pts[:1])):
+        return 0
+
+    return 1 if _point_in_polygon(pnt, polygon) else -1
+
+
+def _contains(outer: Ring, inner: Ring, tolerance: float) -> bool:
+    """True dacă inner are aria mai mică, niciun vârf în exteriorul lui outer și cel puțin unul în interior
+    (vârfurile pe contur, în tolerance [mm], sunt admise)"""
+    positions = [_position(pnt, outer, tolerance) for pnt in inner]
+    return abs(_signed_area(inner)) < abs(_signed_area(outer)) and -1 not in positions and 1 in positions
 
 
 def _recognize_slabs(drawing: Drawing2D, layers: set[str], rules: RecognitionRules,
@@ -664,8 +687,8 @@ def _recognize_slabs(drawing: Drawing2D, layers: set[str], rules: RecognitionRul
 
     contours = ent.contours
     parents  = [[idx for idx, other in enumerate(contours) if idx != pos and other.layer == cnt.layer
-                 and _contains(other.points, cnt.points)] for pos, cnt in enumerate(contours)]
-    _warn_partial_overlaps(contours, parents, warnings)
+                 and _contains(other.points, cnt.points, tol)] for pos, cnt in enumerate(contours)]
+    _warn_partial_overlaps(contours, parents, tol, warnings)
 
     slabs = []
 
@@ -698,8 +721,10 @@ def _warn_open_slab_entities(ent: _Entities, warnings: list[str]) -> None:
                         f"{_fmt(pts[-1])}; plăcile se recunosc doar din contururi închise, ignorată.")
 
 
-def _warn_partial_overlaps(contours: list[_Contour], parents: list[list[int]], warnings: list[str]) -> None:
-    """avertisment pentru contururile de pe același layer care se suprapun parțial (vârfuri și în, și în afară)"""
+def _warn_partial_overlaps(contours: list[_Contour], parents: list[list[int]], tolerance: float,
+                           warnings: list[str]) -> None:
+    """avertisment pentru contururile de pe același layer, fără incluziune, cu vârfuri unul în interiorul
+    celuilalt (vârfurile pe contur, în tolerance [mm], nu contează: plăcile alăturate nu se semnalează)"""
     for pos_a, cnt_a in enumerate(contours):
         for pos_b in range(pos_a + 1, len(contours)):
             cnt_b = contours[pos_b]
@@ -707,8 +732,8 @@ def _warn_partial_overlaps(contours: list[_Contour], parents: list[list[int]], w
             if cnt_a.layer != cnt_b.layer or pos_a in parents[pos_b] or pos_b in parents[pos_a]:
                 continue
 
-            inside = [_point_in_polygon(pnt, cnt_a.points) for pnt in cnt_b.points]
-            inside += [_point_in_polygon(pnt, cnt_b.points) for pnt in cnt_a.points]
+            inside = [_position(pnt, cnt_a.points, tolerance) == 1 for pnt in cnt_b.points]
+            inside += [_position(pnt, cnt_b.points, tolerance) == 1 for pnt in cnt_a.points]
 
             if any(inside):
                 warnings.append(f"Placă: contururile de pe layerul '{cnt_a.layer}' din jurul "
@@ -742,7 +767,7 @@ def recognize(drawing: Drawing2D, rules: RecognitionRules, level: Level) -> Stru
 
     if not any(by_type.values()):
         listed = ", ".join(f"'{layer}'" for layer in sorted(found)) if found else "niciunul (planșă goală)"
-        warnings.append(f"Planșă: niciun layer nu se potrivește cu regulile de recognoaștere. Layere găsite: {listed}.")
+        warnings.append(f"Planșă: niciun layer nu se potrivește cu regulile de recunoaștere. Layere găsite: {listed}.")
 
     columns = sorted(_recognize_columns(drawing, by_type["column"], rules, warnings),
                      key = _ring_center_key)

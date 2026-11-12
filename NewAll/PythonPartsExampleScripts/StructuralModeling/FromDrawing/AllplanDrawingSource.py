@@ -193,7 +193,7 @@ def _child_elements(element: Any) -> list:
 def _type_name(element: Any) -> str:
     try:
         return str(element.GetElementAdapterType().GetTypeName())
-    except Exception:       # pylint: disable=broad-except - doar pentru textul avertismentului
+    except AttributeError:
         return type(element).__name__
 
 

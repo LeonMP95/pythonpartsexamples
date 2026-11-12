@@ -27,6 +27,9 @@ INSUNITS_UNITLESS = 0
 INSUNITS_MM       = 4
 
 DUPLICATE_TOLERANCE_MM     = 1e-6     # puncte consecutive mai apropiate sunt considerate identice
+CLOSURE_TOLERANCE_MM       = 0.01     # capete mai apropiate -> polilinie închisă
+CLOSURE_RELATIVE_TOLERANCE = 1e-6     # sau relativ la diagonala dreptunghiului de încadrare
+MIN_OPEN_POINTS_TO_CLOSE   = 4        # 3 vârfuri distincte + punctul repetat
 MIN_SEGMENTS_FULL_CIRCLE   = 16       # număr minim de segmente pentru un cerc complet
 MAX_SEGMENTS_PER_CURVE     = 10000    # limită de siguranță pentru discretizare
 MAX_BLOCK_DEPTH            = 32       # adâncimea maximă a blocurilor imbricate
@@ -249,8 +252,8 @@ def _ring_area(points: Sequence[Point2]) -> float:
     return abs(total) / 2
 
 
-def _clean_points(points: Iterable[XY], factor: float, closed: bool) -> list[Point2]:
-    """Scalează în mm, elimină punctele consecutive duplicate și ultimul punct = primul la închise"""
+def _clean_points(points: Iterable[XY], factor: float) -> list[Point2]:
+    """Scalează în mm și elimină punctele consecutive duplicate"""
     result: list[Point2] = []
 
     for x, y in points:
@@ -259,10 +262,29 @@ def _clean_points(points: Iterable[XY], factor: float, closed: bool) -> list[Poi
         if not result or math.dist(result[-1], point) > DUPLICATE_TOLERANCE_MM:
             result.append(point)
 
-    if closed and len(result) > 1 and math.dist(result[0], result[-1]) <= DUPLICATE_TOLERANCE_MM:
-        result.pop()
-
     return result
+
+
+def _ends_coincide(points: Sequence[Point2]) -> bool:
+    """True dacă ultimul punct coincide cu primul (0,01 mm sau 1e-6 din diagonala încadrării)"""
+    if len(points) < 2:
+        return False
+
+    xs, ys    = [p[0] for p in points], [p[1] for p in points]
+    diagonal  = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+    tolerance = max(CLOSURE_TOLERANCE_MM, CLOSURE_RELATIVE_TOLERANCE * diagonal)
+    return math.dist(points[0], points[-1]) <= tolerance
+
+
+def _close_points(points: list[Point2], closed: bool) -> tuple[list[Point2], bool]:
+    """Închide polilinia deschisă cu capetele confundate și elimină punctul final repetat"""
+    if not closed and len(points) >= MIN_OPEN_POINTS_TO_CLOSE and _ends_coincide(points):
+        closed = True
+
+    if closed and _ends_coincide(points):
+        points = points[:-1]
+
+    return points, closed and len(points) > 2
 
 
 # ----------------------------------------------------------------------------------------------
@@ -299,13 +321,49 @@ def _boundary_path_points(path: Any, segment_length: float) -> list[XY]:
     return _bulge_polyline(vertices, True, segment_length)
 
 
-def _outer_index(flags: Sequence[int], rings: Sequence[Sequence[Point2]]) -> int:
-    """Indexul conturului exterior: prima cale externă, altfel cel cu aria cea mai mare"""
-    for index, flag in enumerate(flags):
-        if flag & HATCH_PATH_EXTERNAL_FLAG:
-            return index
+def _point_in_ring(point: Point2, ring: Sequence[Point2]) -> bool:
+    """Test punct-în-poligon (raza orizontală)"""
+    x, y   = point
+    inside = False
 
-    return max(range(len(rings)), key = lambda i: _ring_area(rings[i]))
+    for (x1, y1), (x2, y2) in zip(ring, (*ring[1:], ring[0])):
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            inside = not inside
+
+    return inside
+
+
+def _containers(index: int, rings: Sequence[Sequence[Point2]], candidates: Iterable[int]) -> list[int]:
+    """Indicii conturilor candidate care conțin primul punct al conturului dat"""
+    return [i for i in candidates if i != index and _point_in_ring(rings[index][0], rings[i])]
+
+
+def _outer_flags(flags: Sequence[int], rings: Sequence[Sequence[Point2]]) -> list[bool]:
+    """Care contururi sunt exterioare: după flag-ul extern sau, dacă lipsește peste tot,
+    după imbricare (număr par de contururi care îl conțin = exterior)"""
+    if any(flag & HATCH_PATH_EXTERNAL_FLAG for flag in flags):
+        return [bool(flag & HATCH_PATH_EXTERNAL_FLAG) for flag in flags]
+
+    return [len(_containers(i, rings, range(len(rings)))) % 2 == 0 for i in range(len(rings))]
+
+
+def _group_hatch_rings(flags: Sequence[int],
+                       rings: Sequence[Sequence[Point2]]) -> list[tuple[int, list[int]]]:
+    """Grupează contururile: (index exterior, indicii golurilor). Golul aparține celui mai mic
+    contur exterior care îl conține; un gol fără exterior care să-l conțină devine exterior."""
+    is_outer = _outer_flags(flags, rings)
+    outers   = [i for i, outer in enumerate(is_outer) if outer]
+    groups   = {i: [] for i in outers}
+
+    for index in (i for i, outer in enumerate(is_outer) if not outer):
+        containers = _containers(index, rings, outers)
+
+        if containers:
+            groups[min(containers, key = lambda i: _ring_area(rings[i]))].append(index)
+        else:
+            groups[index] = []
+
+    return sorted(groups.items())
 
 
 # ----------------------------------------------------------------------------------------------
@@ -357,17 +415,17 @@ class _Collector:
 
     def _add_line(self, entity: Any, layer: str) -> None:
         """LINE -> Segment2D (coordonatele LINE sunt deja în WCS)"""
-        points = _clean_points(_xy((entity.dxf.start, entity.dxf.end)), self.factor, False)
+        points = _clean_points(_xy((entity.dxf.start, entity.dxf.end)), self.factor)
 
         if len(points) == 2:
             self.segments.append(Segment2D(points[0], points[1], layer))
 
     def _add_points(self, points: Iterable[XY], closed: bool, layer: str) -> None:
         """Adaugă o polilinie din puncte în unitatea desenului (WCS)"""
-        cleaned = _clean_points(points, self.factor, closed)
+        cleaned, closed = _close_points(_clean_points(points, self.factor), closed)
 
         if len(cleaned) >= 2:
-            self.polylines.append(Polyline2D(tuple(cleaned), closed and len(cleaned) > 2, layer))
+            self.polylines.append(Polyline2D(tuple(cleaned), closed, layer))
 
     def _add_lwpolyline(self, entity: Any, layer: str) -> None:
         """LWPOLYLINE -> Polyline2D, cu bulge-urile discretizate"""
@@ -416,25 +474,21 @@ class _Collector:
         self._add_points(points, bool(entity.closed), layer)
 
     def _add_hatch(self, entity: Any, layer: str) -> None:
-        """HATCH -> Hatch2D: conturul exterior și golurile"""
+        """HATCH -> câte un Hatch2D pentru fiecare contur exterior, cu golurile lui"""
         elevation = entity.dxf.elevation.z
         flags: list[int] = []
         rings: list[list[Point2]] = []
 
         for path in entity.paths:
             points = _ocs_to_wcs(entity, _boundary_path_points(path, self.segment_length), elevation)
-            ring   = _clean_points(points, self.factor, True)
+            ring, _ = _close_points(_clean_points(points, self.factor), True)
 
             if len(ring) >= 3:
                 flags.append(path.path_type_flags)
                 rings.append(ring)
 
-        if not rings:
-            return
-
-        outer = _outer_index(flags, rings)
-        holes = tuple(tuple(ring) for i, ring in enumerate(rings) if i != outer)
-        self.hatches.append(Hatch2D(tuple(rings[outer]), holes, layer))
+        for outer, holes in _group_hatch_rings(flags, rings):
+            self.hatches.append(Hatch2D(tuple(rings[outer]), tuple(tuple(rings[i]) for i in holes), layer))
 
     def _add_insert(self, entity: Any, layer: str, depth: int) -> None:
         """INSERT -> entitățile blocului, transformate și explodate recursiv"""

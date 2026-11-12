@@ -75,6 +75,20 @@ class TestBasicEntities(DxfSourceTestBase):
         self.assertEqual(drawing.polylines[0].points, ((0.0, 0.0), (100.0, 0.0), (100.0, 50.0)))
         self.assertFalse(drawing.polylines[0].closed)
 
+    def test_open_polyline_with_coincident_ends_becomes_closed(self):
+        doc = self.new_doc()
+        msp = doc.modelspace()
+        msp.add_lwpolyline([(0, 0), (400, 0), (400, 400), (0, 400), (0.005, 0)])
+        msp.add_lwpolyline([(0, 0), (400, 0), (400, 400), (0, 400), (0, 1)])
+
+        drawing = read_dxf(self.save(doc))
+
+        closed, still_open = drawing.polylines
+        self.assertTrue(closed.closed)
+        self.assertEqual(closed.points, ((0.0, 0.0), (400.0, 0.0), (400.0, 400.0), (0.0, 400.0)))
+        self.assertFalse(still_open.closed)
+        self.assertEqual(len(still_open.points), 5)
+
     def test_insunits_cm_scales_by_ten(self):
         doc = self.new_doc(insunits = 5)
         doc.modelspace().add_line((1, 2), (30, 40))
@@ -216,6 +230,48 @@ class TestHatchesAndBlocks(DxfSourceTestBase):
 
         self.assertIn((1000.0, 1000.0), drawing.hatches[0].outer)
         self.assertIn((400.0, 400.0), drawing.hatches[0].holes[0])
+
+    def test_hatch_with_three_disjoint_external_paths_gives_three_hatches(self):
+        doc = self.new_doc()
+        hatch = doc.modelspace().add_hatch(dxfattribs = {"layer": "STALPI"})
+        for x in (0, 2000, 4000):
+            hatch.paths.add_polyline_path([(x, 0), (x + 400, 0), (x + 400, 400), (x, 400)], flags = 1)
+
+        drawing = read_dxf(self.save(doc))
+
+        self.assertEqual(len(drawing.hatches), 3)
+        self.assertEqual({h.layer for h in drawing.hatches}, {"STALPI"})
+        self.assertTrue(all(h.holes == () for h in drawing.hatches))
+        self.assertEqual(sorted(min(p[0] for p in h.outer) for h in drawing.hatches), [0.0, 2000.0, 4000.0])
+
+    def test_hatch_without_flags_island_in_hole_becomes_new_hatch(self):
+        doc = self.new_doc()
+        hatch = doc.modelspace().add_hatch()
+        hatch.paths.add_polyline_path([(400, 400), (500, 400), (500, 500), (400, 500)], flags = 0)
+        hatch.paths.add_polyline_path([(0, 0), (1000, 0), (1000, 1000), (0, 1000)], flags = 0)
+        hatch.paths.add_polyline_path([(200, 200), (800, 200), (800, 800), (200, 800)], flags = 0)
+
+        drawing = read_dxf(self.save(doc))
+
+        self.assertEqual(len(drawing.hatches), 2)
+        big, island = sorted(drawing.hatches, key = lambda h: min(p[0] for p in h.outer))
+        self.assertIn((1000.0, 1000.0), big.outer)
+        self.assertEqual(len(big.holes), 1)
+        self.assertIn((800.0, 800.0), big.holes[0])
+        self.assertIn((500.0, 500.0), island.outer)
+        self.assertEqual(island.holes, ())
+
+    def test_hatch_holes_go_to_smallest_containing_external_path(self):
+        doc = self.new_doc()
+        hatch = doc.modelspace().add_hatch()
+        hatch.paths.add_polyline_path([(0, 0), (400, 0), (400, 400), (0, 400)], flags = 1)
+        hatch.paths.add_polyline_path([(2000, 0), (2400, 0), (2400, 400), (2000, 400)], flags = 1)
+        hatch.paths.add_polyline_path([(2100, 100), (2200, 100), (2200, 200), (2100, 200)], flags = 0)
+
+        drawing = read_dxf(self.save(doc))
+
+        holes_by_x = {min(p[0] for p in h.outer): len(h.holes) for h in drawing.hatches}
+        self.assertEqual(holes_by_x, {0.0: 0, 2000.0: 1})
 
     def test_hatch_edge_path_with_arc_is_read(self):
         doc = self.new_doc()
