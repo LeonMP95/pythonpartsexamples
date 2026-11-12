@@ -7,10 +7,14 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 
 from dataclasses import dataclass
 
 ELEMENT_TYPES = ("column", "wall", "beam", "slab")
+
+MAX_RULES_FILE_BYTES = 1_000_000    # un fișier de reguli real are câțiva kB
+MAX_LAYER_RULES      = 500
 
 
 class RulesError(ValueError):
@@ -76,6 +80,9 @@ def rules_from_dict(data: dict) -> RecognitionRules:
     if not isinstance(raw_layers, list) or not raw_layers:
         raise RulesError("Cheia 'layers' trebuie să fie o listă nevidă de reguli {\"pattern\": ..., \"element\": ...}")
 
+    if len(raw_layers) > MAX_LAYER_RULES:
+        raise RulesError(f"Prea multe reguli de layer ({len(raw_layers)}); maximum {MAX_LAYER_RULES}")
+
     layers = []
 
     for nr, item in enumerate(raw_layers, start = 1):
@@ -121,11 +128,18 @@ def load_rules(path: str) -> RecognitionRules:
         RulesError: dacă fișierul nu poate fi citit sau este invalid
     """
     try:
+        if os.path.getsize(path) > MAX_RULES_FILE_BYTES:
+            raise RulesError(f"Fișierul de reguli este prea mare (peste {MAX_RULES_FILE_BYTES // 1000} kB)")
+
         with open(path, encoding = "utf-8-sig") as file:
             data = json.load(file)
     except OSError as err:
         raise RulesError(f"Fișierul de reguli nu poate fi citit: {err}") from err
     except json.JSONDecodeError as err:
         raise RulesError(f"Fișierul de reguli nu este JSON valid (linia {err.lineno}): {err.msg}") from err
+    except UnicodeDecodeError as err:
+        raise RulesError("Fișierul de reguli trebuie salvat în codificarea UTF-8") from err
+    except RecursionError as err:
+        raise RulesError("Fișierul de reguli are o structură JSON prea adâncă") from err
 
     return rules_from_dict(data)

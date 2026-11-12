@@ -15,6 +15,8 @@ latura h pe Y, axa stâlpului pe Z.
 from __future__ import annotations
 
 import os
+import re
+import traceback
 
 from typing import TYPE_CHECKING
 
@@ -152,7 +154,12 @@ class SeismicColumn:
             print(f"SeismicColumn: fișierul de eforturi nu poate fi citit: {err}")
             return None
 
-        result = design_column(self.geom, self.mat, cases, self.options)
+        try:
+            result = design_column(self.geom, self.mat, cases, self.options)
+        except Exception:                                   # pylint: disable=broad-except
+            # o eroare neprevăzută nu trebuie să blocheze Allplan: se raportează în trace
+            print("SeismicColumn: eroare neprevăzută la dimensionare:\n" + traceback.format_exc())
+            return None
         report = result.report_text()
 
         print(report)
@@ -170,8 +177,12 @@ class SeismicColumn:
             report:       textul raportului
         """
         base        = os.path.splitext(efforts_file)[0]
-        column_id   = self.build_ele.ColumnId.value.strip()
+        column_id   = re.sub(r"[^\w.-]", "_", self.build_ele.ColumnId.value.strip()).strip(".")
         report_file = f"{base}_{column_id}_raport.txt" if column_id else f"{base}_raport.txt"
+
+        if os.path.islink(report_file):
+            print(f"SeismicColumn: raportul nu se scrie peste o legătură simbolică: {report_file}")
+            return
 
         try:
             with open(report_file, "w", encoding = "utf-8") as file:

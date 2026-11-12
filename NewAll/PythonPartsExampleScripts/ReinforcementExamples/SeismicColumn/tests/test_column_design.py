@@ -104,6 +104,18 @@ class EffortsFileTest(unittest.TestCase):
         cases = parse_efforts("N;Mx_sus\n1000,5;12,25\n")
         self.assertAlmostEqual(cases[0].n, 1000.5)
 
+    def test_size_and_row_limits(self):
+        import tempfile
+        from ReinforcementExamples.SeismicColumn import EffortsFile
+        with self.assertRaises(EffortsFileError):
+            parse_efforts("N\n" + "1\n" * (EffortsFile.MAX_ROWS + 1))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mare.csv")
+            with open(path, "wb") as file:
+                file.write(b"N\n" + b"1" * (EffortsFile.MAX_FILE_BYTES + 1))
+            with self.assertRaises(EffortsFileError):
+                read_efforts_file(path)
+
     def test_errors(self):
         with self.assertRaises(EffortsFileError):
             parse_efforts("Mx;My\n1;2\n")

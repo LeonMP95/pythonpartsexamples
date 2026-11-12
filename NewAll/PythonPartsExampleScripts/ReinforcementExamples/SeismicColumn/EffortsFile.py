@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 
 from .ColumnDesign import EffortCase
 
@@ -33,6 +34,9 @@ COLUMN_ALIASES = {
 }
 
 NUMERIC_FIELDS = ("n", "mx_top", "my_top", "mx_bot", "my_bot", "vx", "vy")
+
+MAX_FILE_BYTES = 20_000_000     # 20 MB
+MAX_ROWS       = 200_000
 
 
 class EffortsFileError(Exception):
@@ -56,6 +60,9 @@ def parse_efforts(text: str, column_id: str = "") -> list[EffortCase]:
 
     if not lines:
         raise EffortsFileError("Fișierul de eforturi este gol")
+
+    if len(lines) > MAX_ROWS:
+        raise EffortsFileError(f"Fișierul de eforturi are prea multe rânduri ({len(lines)}); maximum {MAX_ROWS}")
 
     delimiter     = ";" if lines[0].count(";") >= lines[0].count(",") else ","
     decimal_comma = delimiter == ";"
@@ -123,7 +130,14 @@ def read_efforts_file(path: str, column_id: str = "") -> list[EffortCase]:
 
     Returns:
         lista combinațiilor de eforturi
+
+    Raises:
+        EffortsFileError: fișier prea mare sau format greșit
+        OSError:          fișierul nu poate fi citit
     """
+    if os.path.getsize(path) > MAX_FILE_BYTES:
+        raise EffortsFileError(f"Fișierul de eforturi este prea mare (peste {MAX_FILE_BYTES // 1_000_000} MB)")
+
     try:
         with open(path, encoding = "utf-8-sig") as file:
             text = file.read()
