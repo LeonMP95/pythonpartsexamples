@@ -44,6 +44,7 @@ AllplanArchEle   = sys.modules["NemAll_Python_ArchElements"]
 AllplanBaseEle   = sys.modules["NemAll_Python_BaseElements"]
 AllplanEleAdapter = sys.modules["NemAll_Python_IFW_ElementAdapter"]
 AllplanUtil      = sys.modules["NemAll_Python_Utility"]
+AllplanIFW       = sys.modules["NemAll_Python_IFW_Input"]
 
 from StructuralModeling.FromDrawing import AllplanBuilder, AllplanDrawingSource, StructuralFromDrawing  # noqa: E402
 from StructuralModeling.FromDrawing.DxfSource import DxfSourceError                                      # noqa: E402
@@ -113,24 +114,28 @@ class Path2D:
 
 
 class DivisionPoints:
-    """Puncte la distanța dată pe arc (simulează AllplanGeo.DivisionPoints, fără capete)"""
+    """Împărțirea arcului în `count` părți egale (simulează AllplanGeo.DivisionPoints, fără capete)"""
 
     calls: list = []
 
-    def __init__(self, path, length, eps):
-        DivisionPoints.calls.append((path, length, eps))
-        self.path, self.length = path, length
+    def __init__(self, path, count, eps):
+        DivisionPoints.calls.append((path, count, eps))
+        self.path, self.count = path, count
 
     def GetPoints(self):                     # noqa: N802
         arc   = self.path.items[0]
         sweep = arc.end_angle - arc.start_angle
-        count = math.ceil(abs(sweep) * arc.radius / self.length)
-        return [arc.point(arc.start_angle + sweep * i / count) for i in range(1, count)]
+        return [arc.point(arc.start_angle + sweep * i / self.count) for i in range(1, self.count)]
+
+
+def calc_length(geo):
+    """simulează AllplanGeo.CalcLength pentru Arc2D"""
+    return abs(geo.end_angle - geo.start_angle) * geo.radius
 
 
 GEO_FAKES = {"Point2D": Point2D, "Point3D": Point3D, "Line2D": Line2D, "Polyline2D": Polyline2D2,
              "Polygon2D": Polygon2D, "Arc2D": Arc2D, "Path2D": Path2D, "DivisionPoints": DivisionPoints,
-             "Matrix3D": MagicMock}
+             "CalcLength": calc_length, "Matrix3D": MagicMock}
 
 
 #----------------- arhitectură simulată
@@ -216,7 +221,7 @@ class AllplanFakesMixin(unittest.TestCase):
         DivisionPoints.calls = []
         patchers = [mock.patch.multiple(AllplanGeo, **GEO_FAKES),
                     mock.patch.multiple(AllplanArchEle, **ARCH_FAKES),
-                    mock.patch.multiple(AllplanEleAdapter, Slab_TypeUUID = "SLAB",
+                    mock.patch.multiple(AllplanEleAdapter, Slab_TypeUUID = "SLAB", MultiSlab_TypeUUID = "MULTISLAB",
                                         BaseElementAdapter = MagicMock())]
         for patcher in patchers:
             patcher.start()
@@ -287,9 +292,10 @@ class TestAllplanDrawingSource(AllplanFakesMixin):
         drawing = self.convert(FakeAdapter(arc), seg_len = 100.0)
         poly    = drawing.polylines[0]
 
-        self.assertEqual(DivisionPoints.calls[0][1], 100.0)
+        expected_count = math.ceil(math.pi / 2 * 500 / 100)
+        self.assertEqual(DivisionPoints.calls[0][1], expected_count)
         self.assertFalse(poly.closed)
-        self.assertEqual(len(poly.points), math.ceil(math.pi / 2 * 500 / 100) + 1)
+        self.assertEqual(len(poly.points), expected_count + 1)
         self.assertAlmostEqual(poly.points[0][0], 1500.0, delta = TOL_MM)
         self.assertAlmostEqual(poly.points[-1][1], 1500.0, delta = TOL_MM)
 
@@ -343,6 +349,35 @@ class TestAllplanDrawingSource(AllplanFakesMixin):
     def test_non_positive_arc_segment_length_raises(self):
         with self.assertRaises(ValueError):
             self.convert(FakeAdapter(Line2D(Point2D(0, 0), Point2D(1, 0))), seg_len = 0.0)
+
+
+class TestSegmentCount(unittest.TestCase):
+
+    def test_count_follows_length(self):
+        self.assertEqual(AllplanDrawingSource.segment_count(1000.0, 100.0, False), 10)
+
+    def test_small_full_circle_gets_minimum_16(self):
+        self.assertEqual(AllplanDrawingSource.segment_count(2 * math.pi * 50, 100.0, True),
+                         AllplanDrawingSource.MIN_SEGMENTS_CLOSED)
+
+    def test_huge_curve_capped_at_maximum(self):
+        self.assertEqual(AllplanDrawingSource.segment_count(1e12, 0.001, False), AllplanDrawingSource.MAX_SEGMENTS_CURVE)
+
+    def test_invalid_segment_length_raises(self):
+        for value in (0.0, -1.0, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                AllplanDrawingSource.segment_count(100.0, value, False)
+
+
+class TestArcSegmentLimit(AllplanFakesMixin):
+
+    def test_huge_arc_is_discretized_with_at_most_max_segments(self):
+        with mock.patch.object(AllplanBaseEle.LayerService, "GetShortNameByID", return_value = "S_PERETI"):
+            drawing = AllplanDrawingSource.drawing_from_elements(
+                [FakeAdapter(Arc2D(Point2D(0, 0), 1e9, 0.0, math.pi))], "DOC", 0.01)
+
+        self.assertEqual(DivisionPoints.calls[0][1], AllplanDrawingSource.MAX_SEGMENTS_CURVE)
+        self.assertEqual(len(drawing.polylines[0].points), AllplanDrawingSource.MAX_SEGMENTS_CURVE + 1)
 
 
 #----------------- AllplanBuilder
@@ -456,6 +491,34 @@ class TestAllplanBuilder(AllplanFakesMixin):
         self.assertTrue(any("PL1" in warning for warning in report.warnings))
 
 
+class TestSlabAdapterType(AllplanFakesMixin):
+
+    def test_multislab_adapter_accepted_for_openings(self):
+        multislab = MagicMock()
+        multislab.__eq__ = lambda _self, other: other == "MULTISLAB"
+        multislab.GetModelElementUUID.return_value = "UUID-MULTI"
+        create = MagicMock(side_effect = lambda doc, mat, elements, uuids, asso:
+                           [multislab] if isinstance(elements[0], SlabElement) else [])
+
+        with mock.patch.object(AllplanBaseEle, "CreateElements", create):
+            report = AllplanBuilder.create_in_document(sample_model(), "DOC", AllplanBuilder.BuildOptions())
+
+        self.assertEqual(report.counts["goluri"], 1)
+        self.assertEqual(create.call_args_list[-1].args[2][0].rest, ("UUID-MULTI",))
+
+    def test_warning_names_found_types_when_no_slab_created(self):
+        other = MagicMock()
+        other.__eq__ = lambda _self, _other: False
+        other.GetElementAdapterType.return_value.GetTypeName.return_value = "SlabTier"
+        create = MagicMock(side_effect = lambda doc, mat, elements, uuids, asso:
+                           [other] if isinstance(elements[0], SlabElement) else [])
+
+        with mock.patch.object(AllplanBaseEle, "CreateElements", create):
+            report = AllplanBuilder.create_in_document(sample_model(), "DOC", AllplanBuilder.BuildOptions())
+
+        self.assertIn("SlabTier", report.warnings[-1])
+
+
 #----------------- StructuralFromDrawing (logica paletei și interactorul)
 
 
@@ -493,6 +556,15 @@ class TestPaletteLogic(unittest.TestCase):
 
             with self.assertRaises(RulesError):
                 StructuralFromDrawing.effective_rules(StructuralFromDrawing.read_palette(build_ele(RulesFile = path)))
+
+    def test_missing_default_rules_file_asks_to_copy_data_folder(self):
+        missing = os.path.join(tempfile.gettempdir(), "nu_exista_9876", "RulesDefault.json")
+
+        with mock.patch.object(StructuralFromDrawing, "DEFAULT_RULES_FILE", missing):
+            with self.assertRaises(RulesError) as ctx:
+                StructuralFromDrawing.effective_rules(StructuralFromDrawing.read_palette(build_ele()))
+
+        self.assertIn("data/", str(ctx.exception))
 
     def test_level_from_palette(self):
         level = StructuralFromDrawing.level_from_palette(StructuralFromDrawing.read_palette(build_ele()))
@@ -581,6 +653,112 @@ class TestInteractor(AllplanFakesMixin):
         self.interactor().on_control_event(999)
 
         self.message_box.assert_not_called()
+
+    def test_escape_closes_palette_and_running_selection(self):
+        with mock.patch.object(AllplanIFW.InputFunctionStarter, "RemoveFunction") as remove:
+            interactor = self.interactor()
+            result     = interactor.on_cancel_function()
+
+        self.assertTrue(result)
+        interactor.palette_service.close_palette.assert_called_once()
+        remove.assert_called_once()
+        self.assertIsNone(interactor.post_element_selection)
+
+    def test_unexpected_exception_at_button_is_caught_with_one_message_box(self):
+        interactor         = self.interactor()
+        interactor.drawing = Drawing2D()
+
+        with mock.patch.object(StructuralFromDrawing, "recognize", MagicMock(return_value = sample_model())), \
+             mock.patch.object(StructuralFromDrawing, "create_in_document", MagicMock(side_effect = RuntimeError("x"))), \
+             mock.patch.object(AllplanIFW.InputFunctionStarter, "StartElementSelect") as start_select:
+            interactor.on_control_event(StructuralFromDrawing.CREATE_EVENT_ID)
+
+        self.message_box.assert_called_once()
+        self.assertEqual(self.message_box.call_args.args[0], StructuralFromDrawing.UNEXPECTED_ERROR_TEXT)
+        self.assertIsNone(interactor.drawing)
+        start_select.assert_called_once()                            # selecția poate continua
+
+    def test_unexpected_exception_in_preview_is_caught(self):
+        interactor         = self.interactor()
+        interactor.drawing = Drawing2D()
+
+        with mock.patch.object(StructuralFromDrawing, "recognize", MagicMock(side_effect = RuntimeError("x"))):
+            interactor.modify_element_property(0, "BeamWidth", 250.0)
+
+        self.assertEqual(interactor.preview_elements, [])
+        self.message_box.assert_not_called()
+
+    def test_unexpected_exception_in_selection_conversion_restarts_selection(self):
+        interactor = self.interactor()
+        interactor.post_element_selection = MagicMock()
+        interactor.post_element_selection.GetSelectedElements.return_value = [object()]
+
+        with mock.patch.object(StructuralFromDrawing, "drawing_from_elements", MagicMock(side_effect = RuntimeError)), \
+             mock.patch.object(AllplanIFW.InputFunctionStarter, "StartElementSelect") as start_select:
+            self.assertTrue(interactor.process_mouse_msg(0, None, None))
+
+        self.assertIsNone(interactor.drawing)
+        start_select.assert_called_once()
+
+    def test_switch_source_between_selection_and_dxf(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "plan.dxf")
+            with open(path, "w", encoding = "utf-8") as file:
+                file.write("0\nEOF\n")
+
+            read = MagicMock(return_value = Drawing2D())
+
+            with mock.patch.object(StructuralFromDrawing, "read_dxf", read), \
+                 mock.patch.object(StructuralFromDrawing, "recognize", MagicMock(return_value = sample_model())), \
+                 mock.patch.object(AllplanIFW.InputFunctionStarter, "RemoveFunction") as remove, \
+                 mock.patch.object(AllplanIFW.InputFunctionStarter, "StartElementSelect") as start_select:
+                interactor = self.interactor(DxfFile = path)
+                interactor.build_ele.Source.value = StructuralFromDrawing.SOURCE_DXF
+                interactor.modify_element_property(0, "Source", StructuralFromDrawing.SOURCE_DXF)
+
+                remove.assert_called_once()
+                self.assertIsNone(interactor.post_element_selection)
+                interactor.coord_input.InitFirstElementInput.assert_called()
+                read.assert_called_once_with(path)
+                self.assertEqual(len(interactor.preview_elements), 4)
+
+                interactor.build_ele.Source.value = StructuralFromDrawing.SOURCE_MODEL
+                interactor.modify_element_property(0, "Source", StructuralFromDrawing.SOURCE_MODEL)
+
+                self.assertIsNotNone(interactor.post_element_selection)
+                self.assertEqual(start_select.call_count, 2)
+                self.assertIsNone(interactor.drawing)
+                self.assertEqual(interactor.preview_elements, [])
+
+    def test_preview_cache_reads_dxf_and_recognizes_once_for_level_name_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "plan.dxf")
+            with open(path, "w", encoding = "utf-8") as file:
+                file.write("0\nEOF\n")
+
+            read      = MagicMock(return_value = Drawing2D())
+            recognize = MagicMock(return_value = sample_model())
+
+            with mock.patch.object(StructuralFromDrawing, "read_dxf", read), \
+                 mock.patch.object(StructuralFromDrawing, "recognize", recognize), \
+                 mock.patch.object(StructuralFromDrawing, "load_rules",
+                                   MagicMock(wraps = StructuralFromDrawing.load_rules)) as load:
+                interactor = self.interactor(Source = 2, DxfFile = path)
+
+                for name in ("Etaj 2", "Etaj 3"):
+                    interactor.build_ele.LevelName.value = name
+                    interactor.modify_element_property(0, "LevelName", name)
+
+                self.assertEqual((read.call_count, recognize.call_count, load.call_count), (1, 1, 1))
+
+                interactor.build_ele.BeamDepth.value = 700.0                 # influențează recunoașterea
+                interactor.modify_element_property(0, "BeamDepth", 700.0)
+                self.assertEqual((read.call_count, recognize.call_count, load.call_count), (1, 2, 1))
+
+                with open(path, "a", encoding = "utf-8") as file:           # fișier schimbat -> recitit
+                    file.write("\n")
+                interactor.modify_element_property(0, "DxfFile", path)
+                self.assertEqual(read.call_count, 2)
 
 
 if __name__ == "__main__":

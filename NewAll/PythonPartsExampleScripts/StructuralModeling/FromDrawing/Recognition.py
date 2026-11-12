@@ -16,16 +16,20 @@ from __future__ import annotations
 
 import math
 
+from collections import defaultdict
 from dataclasses import dataclass
 
-from .Model2D import Drawing2D, Point2, Segment2D
-from .RecognitionRules import RecognitionRules
-from .StructuralModel import Beam, Column, Level, Slab, StructuralModel, Wall
+from StructuralModeling.FromDrawing.Model2D import Drawing2D, Point2, Segment2D
+from StructuralModeling.FromDrawing.RecognitionRules import RecognitionRules
+from StructuralModeling.FromDrawing.StructuralModel import Beam, Column, Level, Slab, StructuralModel, Wall
 
 Ring = tuple[Point2, ...]
 
 _EPS = 1e-9                     # zero numeric pentru împărțiri [mm]
 _SORT_DECIMALS = 1              # rotunjirea coordonatelor la sortare (elimină zgomotul numeric) [mm]
+
+_MAX_LISTED_WARNINGS = 10      # peste acest număr, avertismentele „linie fără față opusă” se agregă
+_LISTED_POSITIONS    = 5       # pozițiile afișate în avertismentul agregat
 
 _LABEL = {"column": "Stâlp", "wall": "Perete", "beam": "Grindă", "slab": "Placă"}
 _SOURCE_PRIORITY = {"polilinie": 0, "segmente": 1, "hașură": 2}
@@ -110,6 +114,57 @@ def _point_in_polygon(pnt: Point2, polygon: Ring) -> bool:
                 inside = not inside
 
     return inside
+
+
+class _GridIndex:
+    """Index spațial pe celule pătrate cu latura cell_mm [mm]; obiectele (indici) se înregistrează
+    cu dreptunghiul încadrator, interogarea întoarce indicii din celulele atinse de un dreptunghi
+    (superset al obiectelor care îl intersectează)."""
+
+    def __init__(self, cell_mm: float):
+        self.cell  = max(cell_mm, 1.0)
+        self.cells: dict[tuple[int, int], list[int]] = defaultdict(list)
+
+    def _keys(self, box: tuple[float, float, float, float]):
+        i_0, j_0 = math.floor(box[0] / self.cell), math.floor(box[1] / self.cell)
+        i_1, j_1 = math.floor(box[2] / self.cell), math.floor(box[3] / self.cell)
+        return ((i, j) for i in range(i_0, i_1 + 1) for j in range(j_0, j_1 + 1))
+
+    def insert(self, item: int, box: tuple[float, float, float, float]) -> None:
+        for key in self._keys(box):
+            self.cells[key].append(item)
+
+    def query(self, box: tuple[float, float, float, float]) -> list[int]:
+        """indicii (sortați, fără duplicate) din celulele atinse de box"""
+        return sorted({item for key in self._keys(box) for item in self.cells.get(key, ())})
+
+
+def _box_around(points, margin: float) -> tuple[float, float, float, float]:
+    """dreptunghiul încadrator al punctelor, lărgit cu margin [mm] pe fiecare parte"""
+    x_min, y_min, x_max, y_max = _bbox(tuple(points))
+    return x_min - margin, y_min - margin, x_max + margin, y_max + margin
+
+
+def _segment_distance(pnt: Point2, p_a: Point2, p_b: Point2) -> float:
+    """distanța de la pnt la segmentul p_a - p_b [mm]"""
+    length_sq = (p_b[0] - p_a[0]) ** 2 + (p_b[1] - p_a[1]) ** 2
+
+    if length_sq < _EPS:
+        return _dist(pnt, p_a)
+
+    par = ((pnt[0] - p_a[0]) * (p_b[0] - p_a[0]) + (pnt[1] - p_a[1]) * (p_b[1] - p_a[1])) / length_sq
+    par = min(1.0, max(0.0, par))
+    return _dist(pnt, (p_a[0] + par * (p_b[0] - p_a[0]), p_a[1] + par * (p_b[1] - p_a[1])))
+
+
+def _position(pnt: Point2, polygon: Ring, tolerance: float) -> int:
+    """poziția punctului față de poligon: 1 = în interior, 0 = pe contur (în tolerance [mm]), -1 = în exterior"""
+    pts = list(polygon)
+
+    if any(_segment_distance(pnt, p_1, p_2) <= tolerance for p_1, p_2 in zip(pts, pts[1:] + pts[:1])):
+        return 0
+
+    return 1 if _point_in_polygon(pnt, polygon) else -1
 
 
 def _ring_edges(points: Ring, layer: str) -> list[Segment2D]:
@@ -344,33 +399,41 @@ def _chain_loops(segments: list[Segment2D], tolerance: float) -> tuple[list[Ring
 
     Lanțul pornește dintr-un segment și continuă cât timp există exact un segment nefolosit
     cu un capăt în capătul curent; o ramificație (mai multe candidate) oprește lanțul (nu se ghicește).
+    Capetele se caută printr-un index spațial (celulă = tolerance).
     Returnează contururile închise (necurățate) și segmentele rămase.
     """
-    used = [False] * len(segments)
+    index = _GridIndex(tolerance)
+
+    for idx, seg in enumerate(segments):
+        index.insert(idx, _box_around((seg.start,), 0.0))
+        index.insert(idx, _box_around((seg.end,), 0.0))
+
+    used: set[int] = set()
     loops: list[Ring] = []
 
     for first, seg in enumerate(segments):
-        if used[first]:
+        if first in used:
             continue
 
-        chain, points = [first], [seg.start, seg.end]
+        chain, in_chain, points = [first], {first}, [seg.start, seg.end]
 
         while not (len(chain) >= 3 and _dist(points[-1], points[0]) <= tolerance):
-            candidates = [idx for idx, other in enumerate(segments)
-                          if not used[idx] and idx not in chain
-                          and min(_dist(other.start, points[-1]), _dist(other.end, points[-1])) <= tolerance]
+            candidates = [idx for idx in index.query(_box_around((points[-1],), tolerance))
+                          if idx not in used and idx not in in_chain
+                          and min(_dist(segments[idx].start, points[-1]),
+                                  _dist(segments[idx].end, points[-1])) <= tolerance]
             if len(candidates) != 1:
                 break
 
             other = segments[candidates[0]]
             chain.append(candidates[0])
+            in_chain.add(candidates[0])
             points.append(other.end if _dist(other.start, points[-1]) <= tolerance else other.start)
         else:
-            for idx in chain:
-                used[idx] = True
+            used.update(chain)
             loops.append(tuple(points[:-1]))
 
-    return loops, [seg for idx, seg in enumerate(segments) if not used[idx]]
+    return loops, [seg for idx, seg in enumerate(segments) if idx not in used]
 
 
 def _column_contours(ent: _Entities, rules: RecognitionRules, warnings: list[str]) -> list[_Contour]:
@@ -445,6 +508,68 @@ class _WallAxis:
         return _dist(self.start, self.end)
 
 
+def _parallel_lines(p_1: Point2, p_2: Point2, q_1: Point2, q_2: Point2, rules: RecognitionRules) -> bool:
+    """True dacă dreptele p_1-p_2 și q_1-q_2 sunt paralele în parallel_tolerance_deg"""
+    return _angle_diff_deg(_direction_deg(p_1, p_2), _direction_deg(q_1, q_2)) <= rules.parallel_tolerance_deg
+
+
+def _parallel(wall_a: _WallAxis, wall_b: _WallAxis, rules: RecognitionRules) -> bool:
+    return _parallel_lines(wall_a.start, wall_a.end, wall_b.start, wall_b.end, rules)
+
+
+def _param_along(pnt: Point2, p_a: Point2, p_b: Point2) -> float:
+    """coordonata proiecției lui pnt pe dreapta p_a -> p_b, măsurată de la p_a [mm]"""
+    length = _dist(p_a, p_b)
+    return ((pnt[0] - p_a[0]) * (p_b[0] - p_a[0]) + (pnt[1] - p_a[1]) * (p_b[1] - p_a[1])) / length
+
+
+def _point_at(wall: _WallAxis, par: float) -> Point2:
+    """punctul de pe dreapta-suport a axei, la distanța par [mm] de start"""
+    return (wall.start[0] + (wall.end[0] - wall.start[0]) * par / wall.length,
+            wall.start[1] + (wall.end[1] - wall.start[1]) * par / wall.length)
+
+
+def _span_wall(walls: list[_WallAxis], tolerance: float) -> _WallAxis:
+    """Peretele care acoperă pereții coliniari dați: de la primul la ultimul capăt de-a lungul
+    axei primului perete; grosimea = media ponderată cu lungimile [mm]"""
+    ref  = walls[0]
+    ends = sorted((pnt for wall in walls for pnt in (wall.start, wall.end)),
+                  key = lambda pnt: _param_along(pnt, ref.start, ref.end))
+    thickness = sum(wall.thickness * wall.length for wall in walls) / sum(wall.length for wall in walls)
+    return _WallAxis(*_canonical_axis(ends[0], ends[-1], tolerance), thickness)
+
+
+def _components(count: int, pairs: list[tuple[int, int]]) -> list[list[int]]:
+    """componentele conexe (union-find) ale grafului cu count noduri; fiecare componentă sortată"""
+    parent = list(range(count))
+
+    def root(idx: int) -> int:
+        while parent[idx] != idx:
+            parent[idx] = parent[parent[idx]]
+            idx = parent[idx]
+        return idx
+
+    for idx_a, idx_b in pairs:
+        parent[root(idx_a)] = root(idx_b)
+
+    groups: dict[int, list[int]] = defaultdict(list)
+
+    for idx in range(count):
+        groups[root(idx)].append(idx)
+
+    return sorted(groups.values())
+
+
+def _wall_index(walls: list[_WallAxis], rules: RecognitionRules) -> _GridIndex:
+    """index spațial al axelor pereților (celulă = wall_max_thickness)"""
+    index = _GridIndex(rules.wall_max_thickness)
+
+    for idx, wall in enumerate(walls):
+        index.insert(idx, _box_around((wall.start, wall.end), 0.0))
+
+    return index
+
+
 def _face_pair(face_a: Segment2D, face_b: Segment2D, rules: RecognitionRules) -> _WallAxis | None:
     """Peretele format de două fețe sau None
 
@@ -452,8 +577,7 @@ def _face_pair(face_a: Segment2D, face_b: Segment2D, rules: RecognitionRules) ->
     lui face_a >= wall_min_length [mm], distanța între fețe (media la capetele zonei de suprapunere)
     în [wall_min_thickness, wall_max_thickness] [mm]. Axa = linia mediană pe zona de suprapunere.
     """
-    if _angle_diff_deg(_direction_deg(face_a.start, face_a.end),
-                       _direction_deg(face_b.start, face_b.end)) > rules.parallel_tolerance_deg:
+    if not _parallel_lines(face_a.start, face_a.end, face_b.start, face_b.end, rules):
         return None
 
     u_x = (face_a.end[0] - face_a.start[0]) / face_a.length
@@ -488,15 +612,35 @@ def _face_interval(face: Segment2D, axis: _WallAxis) -> tuple[float, float]:
     return params[0], params[1]
 
 
-def _param_along(pnt: Point2, p_a: Point2, p_b: Point2) -> float:
-    """coordonata proiecției lui pnt pe dreapta p_a -> p_b, măsurată de la p_a [mm]"""
-    length = _dist(p_a, p_b)
-    return ((pnt[0] - p_a[0]) * (p_b[0] - p_a[0]) + (pnt[1] - p_a[1]) * (p_b[1] - p_a[1])) / length
-
-
 def _interval_free(used: list[tuple[float, float]], interval: tuple[float, float], tolerance: float) -> bool:
     """True dacă intervalul nu se suprapune (cu mai mult de tolerance [mm]) cu niciun interval folosit"""
     return all(min(end, interval[1]) - max(start, interval[0]) <= tolerance for start, end in used)
+
+
+def _face_candidates(faces: list[Segment2D], rules: RecognitionRules) -> list[tuple[float, int, int, _WallAxis]]:
+    """Perechile posibile de fețe (thickness, idx_a, idx_b, axă), sortate
+
+    Se compară doar fețele vecine în indexul spațial: dreptunghiurile încadratoare lărgite cu
+    wall_max_thickness / 2 + point_tolerance [mm] se ating (superset al perechilor valide).
+    """
+    margin = rules.wall_max_thickness / 2 + rules.point_tolerance
+    boxes  = [_box_around((face.start, face.end), margin) for face in faces]
+    index  = _GridIndex(rules.wall_max_thickness)
+
+    for idx, box in enumerate(boxes):
+        index.insert(idx, box)
+
+    candidates = []
+
+    for idx_a, face_a in enumerate(faces):
+        for idx_b in index.query(boxes[idx_a]):
+            if idx_b > idx_a:
+                axis = _face_pair(face_a, faces[idx_b], rules)
+                if axis is not None:
+                    candidates.append((axis.thickness, idx_a, idx_b, axis))
+
+    candidates.sort(key = lambda cand: cand[:3])
+    return candidates
 
 
 def _pair_faces(faces: list[Segment2D], rules: RecognitionRules) -> tuple[list[_WallAxis], list[Segment2D]]:
@@ -507,19 +651,10 @@ def _pair_faces(faces: list[Segment2D], rules: RecognitionRules) -> tuple[list[_
     perechi cu mai multe segmente de pe partea opusă, pe porțiuni care nu se suprapun (în point_tolerance).
     Returnează pereții și fețele nefolosite deloc.
     """
-    candidates = []
-
-    for idx_a in range(len(faces)):
-        for idx_b in range(idx_a + 1, len(faces)):
-            axis = _face_pair(faces[idx_a], faces[idx_b], rules)
-            if axis is not None:
-                candidates.append((axis.thickness, idx_a, idx_b, axis))
-
-    candidates.sort(key = lambda cand: cand[:3])
     used: dict[int, list[tuple[float, float]]] = {}
     walls = []
 
-    for _, idx_a, idx_b, axis in candidates:
+    for _, idx_a, idx_b, axis in _face_candidates(faces, rules):
         portion_a = _face_interval(faces[idx_a], axis)
         portion_b = _face_interval(faces[idx_b], axis)
 
@@ -553,104 +688,106 @@ def _wall_from_rectangle(contour: _Contour, rect: _RectAxis, rules: RecognitionR
     return None
 
 
-def _try_merge(wall_a: _WallAxis, wall_b: _WallAxis, rules: RecognitionRules) -> _WallAxis | None:
-    """Unește doi pereți coliniari consecutivi (aceeași axă și grosime în point_tolerance, paraleli în
-    parallel_tolerance_deg, un capăt comun în point_tolerance) sau None"""
+def _collinear(wall_a: _WallAxis, wall_b: _WallAxis, rules: RecognitionRules) -> bool:
+    """aceeași grosime și aceeași dreaptă-suport (în point_tolerance [mm] și parallel_tolerance_deg)"""
     tol = rules.point_tolerance
-
-    if (abs(wall_a.thickness - wall_b.thickness) > tol
-            or _angle_diff_deg(_direction_deg(wall_a.start, wall_a.end),
-                               _direction_deg(wall_b.start, wall_b.end)) > rules.parallel_tolerance_deg
-            or _line_distance(wall_b.start, wall_a.start, wall_a.end) > tol
-            or _line_distance(wall_b.end, wall_a.start, wall_a.end) > tol
-            or not any(_dist(p_a, p_b) <= tol for p_a in (wall_a.start, wall_a.end)
-                       for p_b in (wall_b.start, wall_b.end))):
-        return None
-
-    u_x = (wall_a.end[0] - wall_a.start[0]) / wall_a.length
-    u_y = (wall_a.end[1] - wall_a.start[1]) / wall_a.length
-    ends = sorted((wall_a.start, wall_a.end, wall_b.start, wall_b.end),
-                  key = lambda pnt: (pnt[0] - wall_a.start[0]) * u_x + (pnt[1] - wall_a.start[1]) * u_y)
-    thickness = ((wall_a.thickness * wall_a.length + wall_b.thickness * wall_b.length)
-                 / (wall_a.length + wall_b.length))
-    return _WallAxis(*_canonical_axis(ends[0], ends[-1], tol), thickness)
+    return (abs(wall_a.thickness - wall_b.thickness) <= tol and _parallel(wall_a, wall_b, rules)
+            and _line_distance(wall_b.start, wall_a.start, wall_a.end) <= tol
+            and _line_distance(wall_b.end, wall_a.start, wall_a.end) <= tol)
 
 
 def _merge_walls(walls: list[_WallAxis], rules: RecognitionRules) -> list[_WallAxis]:
-    """unește repetat perechile de pereți coliniari consecutivi până nu mai există niciuna"""
-    items  = list(walls)
-    merged = True
+    """Unește pereții coliniari consecutivi (_collinear și un capăt comun în point_tolerance [mm])
 
-    while merged:
-        merged = False
+    Perechile se caută printr-un index pe capete; lanțurile de pereți se unesc dintr-o dată (union-find).
+    """
+    tol   = rules.point_tolerance
+    index = _GridIndex(tol)
 
-        for idx_a in range(len(items)):
-            for idx_b in range(idx_a + 1, len(items)):
-                joined = _try_merge(items[idx_a], items[idx_b], rules)
-                if joined is not None:
-                    items[idx_a] = joined
-                    del items[idx_b]
-                    merged = True
-                    break
-            if merged:
-                break
+    for idx, wall in enumerate(walls):
+        index.insert(idx, _box_around((wall.start,), 0.0))
+        index.insert(idx, _box_around((wall.end,), 0.0))
 
-    return items
+    pairs = []
 
+    for idx_a, wall_a in enumerate(walls):
+        for end in (wall_a.start, wall_a.end):
+            for idx_b in index.query(_box_around((end,), tol)):
+                wall_b = walls[idx_b]
+                if (idx_b > idx_a and min(_dist(end, wall_b.start), _dist(end, wall_b.end)) <= tol
+                        and _collinear(wall_a, wall_b, rules)):
+                    pairs.append((idx_a, idx_b))
 
-def _parallel(wall_a: _WallAxis, wall_b: _WallAxis, rules: RecognitionRules) -> bool:
-    return _angle_diff_deg(_direction_deg(wall_a.start, wall_a.end),
-                           _direction_deg(wall_b.start, wall_b.end)) <= rules.parallel_tolerance_deg
+    return [_span_wall([walls[idx] for idx in group], tol) for group in _components(len(walls), pairs)]
 
 
-def _gap_filled_by_wall(wall_a: _WallAxis, wall_b: _WallAxis, others: list[_WallAxis],
-                        rules: RecognitionRules) -> bool:
-    """True dacă golul dintre doi pereți coliniari este ocupat de capătul unui perete neparalel
-    (nod în T cu fața continuă): golul <= grosimea acelui perete + 2 point_tolerance, iar capătul lui
-    se proiectează în gol și e la cel mult grosime/2 + point_tolerance de axă [mm]"""
-    tol = rules.point_tolerance
+def _gap_between(wall_a: _WallAxis, wall_b: _WallAxis, tolerance: float) -> tuple[float, float] | None:
+    """golul dintre doi pereți coliniari, ca interval pe axa lui wall_a [mm], sau None dacă se ating / suprapun"""
     params_b = sorted(_param_along(pnt, wall_a.start, wall_a.end) for pnt in (wall_b.start, wall_b.end))
 
-    if params_b[0] > wall_a.length + tol:
-        gap = (wall_a.length, params_b[0])
-    elif params_b[1] < -tol:
-        gap = (params_b[1], 0.0)
-    else:
+    if params_b[0] > wall_a.length + tolerance:
+        return wall_a.length, params_b[0]
+
+    if params_b[1] < -tolerance:
+        return params_b[1], 0.0
+
+    return None
+
+
+def _gap_filled_by(wall_a: _WallAxis, gap: tuple[float, float], other: _WallAxis, rules: RecognitionRules) -> bool:
+    """True dacă golul de pe axa lui wall_a este ocupat de peretele neparalel other
+
+    -   T: golul <= grosimea lui other + 2 point_tolerance, iar un capăt al lui other se proiectează
+        în gol și este la cel mult grosimea lui wall_a / 2 + point_tolerance de axă;
+    -   X: golul = grosimea lui other ± 2 point_tolerance, iar axa lui other traversează golul.
+    """
+    tol    = rules.point_tolerance
+    length = gap[1] - gap[0]
+
+    if _parallel(wall_a, other, rules) or length > other.thickness + 2 * tol:
         return False
 
-    for other in others:
-        if _parallel(other, wall_a, rules) or gap[1] - gap[0] > other.thickness + 2 * tol:
-            continue
+    for end in (other.start, other.end):
+        if (gap[0] - tol <= _param_along(end, wall_a.start, wall_a.end) <= gap[1] + tol
+                and _line_distance(end, wall_a.start, wall_a.end) <= wall_a.thickness / 2 + tol):
+            return True
 
-        for end in (other.start, other.end):
-            if (gap[0] - tol <= _param_along(end, wall_a.start, wall_a.end) <= gap[1] + tol
-                    and _line_distance(end, wall_a.start, wall_a.end) <= wall_a.thickness / 2 + tol):
-                return True
+    cross = _axis_intersection(wall_a, other)
 
-    return False
+    return (cross is not None and abs(length - other.thickness) <= 2 * tol
+            and gap[0] - tol <= _param_along(cross, wall_a.start, wall_a.end) <= gap[1] + tol
+            and -tol <= _param_along(cross, other.start, other.end) <= other.length + tol)
 
 
-def _bridge_t_gaps(walls: list[_WallAxis], rules: RecognitionRules) -> list[_WallAxis]:
-    """Unește pereții coliniari (aceeași grosime și axă în point_tolerance) separați doar de capătul
-    unui perete perpendicular (_gap_filled_by_wall). Golurile de uși rămân goluri."""
-    items = list(walls)
-    tol   = rules.point_tolerance
+def _bridge_gaps(walls: list[_WallAxis], rules: RecognitionRules) -> list[_WallAxis]:
+    """Unește pereții coliniari separați doar de un perete neparalel în nod T sau X (_gap_filled_by).
+    Golurile de uși rămân goluri. Toate perechile se evaluează pe pereții inițiali, apoi se unesc
+    dintr-o dată (union-find)."""
+    tol    = rules.point_tolerance
+    reach  = rules.wall_max_thickness + 2 * tol
+    walls_ix = _wall_index(walls, rules)
+    pairs  = []
 
-    for idx_a, idx_b in ((i, j) for i in range(len(items)) for j in range(i + 1, len(items))):
-        wall_a, wall_b = items[idx_a], items[idx_b]
+    for idx_a, wall_a in enumerate(walls):
+        for end in (wall_a.start, wall_a.end):
+            for idx_b in walls_ix.query(_box_around((end,), reach)):
+                wall_b = walls[idx_b]
 
-        if (abs(wall_a.thickness - wall_b.thickness) <= tol and _parallel(wall_a, wall_b, rules)
-                and _line_distance(wall_b.start, wall_a.start, wall_a.end) <= tol
-                and _line_distance(wall_b.end, wall_a.start, wall_a.end) <= tol
-                and _gap_filled_by_wall(wall_a, wall_b, items[:idx_a] + items[idx_a + 1:idx_b] + items[idx_b + 1:],
-                                        rules)):
-            ends = sorted((wall_a.start, wall_a.end, wall_b.start, wall_b.end),
-                          key = lambda pnt: _param_along(pnt, wall_a.start, wall_a.end))
-            joined = _WallAxis(*_canonical_axis(ends[0], ends[-1], tol), (wall_a.thickness + wall_b.thickness) / 2)
-            rest   = [wall for idx, wall in enumerate(items) if idx not in (idx_a, idx_b)]
-            return _bridge_t_gaps([joined, *rest], rules)
+                if idx_b <= idx_a or not _collinear(wall_a, wall_b, rules):
+                    continue
 
-    return items
+                gap = _gap_between(wall_a, wall_b, tol)
+
+                if gap is None or gap[1] - gap[0] > reach:
+                    continue
+
+                gap_box = _box_around((_point_at(wall_a, gap[0]), _point_at(wall_a, gap[1])), reach)
+
+                if any(_gap_filled_by(wall_a, gap, walls[idx_c], rules)
+                       for idx_c in walls_ix.query(gap_box) if idx_c not in (idx_a, idx_b)):
+                    pairs.append((idx_a, idx_b))
+
+    return [_span_wall([walls[idx] for idx in group], tol) for group in _components(len(walls), pairs)]
 
 
 def _axis_intersection(wall_a: _WallAxis, wall_b: _WallAxis) -> Point2 | None:
@@ -667,22 +804,36 @@ def _axis_intersection(wall_a: _WallAxis, wall_b: _WallAxis) -> Point2 | None:
     return wall_a.start[0] + par * d_a[0], wall_a.start[1] + par * d_a[1]
 
 
+def _junction_neighbours(walls: list[_WallAxis], rules: RecognitionRules) -> list[list[int]]:
+    """pentru fiecare perete, pereții neparaleli aflați lângă capetele lui (index spațial)"""
+    reach = 2 * (rules.wall_max_thickness + rules.point_tolerance)
+    index = _wall_index(walls, rules)
+    near  = []
+
+    for idx_a, wall in enumerate(walls):
+        found = set(index.query(_box_around((wall.start,), reach))) | set(index.query(_box_around((wall.end,), reach)))
+        near.append(sorted(idx for idx in found if idx != idx_a and not _parallel(wall, walls[idx], rules)))
+
+    return near
+
+
 def _join_corners(walls: list[_WallAxis], rules: RecognitionRules) -> list[_WallAxis]:
     """Noduri în L și T: axele se prelungesc / scurtează până la intersecție
 
     -   L: capetele cele mai apropiate ale doi pereți neparaleli sunt la cel mult max(grosimi) [mm]
         de intersecția axelor → ambele capete se mută în intersecție;
     -   T: capătul unui perete este la cel mult grosimea celuilalt / 2 + point_tolerance [mm] de axa
-        celuilalt și se proiectează în interiorul lungimii lui → capătul se mută pe axa celuilalt.
+        celuilalt și se proiectează în interiorul lungimii lui → capătul se mută pe axa celuilalt,
+        dacă deplasarea este cel mult max(grosimi) + point_tolerance (altfel nu se modifică nimic,
+        de ex. la pereți aproape paraleli).
     Fiecare capăt se mută cel mult o dată (L are prioritate).
     """
     tol   = rules.point_tolerance
     ends  = [[wall.start, wall.end] for wall in walls]
     fixed: set[tuple[int, int]] = set()
-    pairs = [(i, j) for i in range(len(walls)) for j in range(len(walls))
-             if i != j and not _parallel(walls[i], walls[j], rules)]
+    near  = _junction_neighbours(walls, rules)
 
-    for idx_a, idx_b in (pair for pair in pairs if pair[0] < pair[1]):
+    for idx_a, idx_b in ((a, b) for a in range(len(walls)) for b in near[a] if b > a):
         cross = _axis_intersection(walls[idx_a], walls[idx_b])
 
         if cross is None:
@@ -697,16 +848,16 @@ def _join_corners(walls: list[_WallAxis], rules: RecognitionRules) -> list[_Wall
             ends[idx_a][end_a] = ends[idx_b][end_b] = cross
             fixed.update(((idx_a, end_a), (idx_b, end_b)))
 
-    for idx_a, idx_b in pairs:
+    for idx_a, idx_b in ((a, b) for a in range(len(walls)) for b in near[a]):
         host  = walls[idx_b]
-        reach = host.thickness / 2 + tol
+        cross = _axis_intersection(walls[idx_a], host)
+        cap   = max(walls[idx_a].thickness, host.thickness) + tol
 
         for k in (0, 1):
             end = ends[idx_a][k]
 
-            cross = _axis_intersection(walls[idx_a], host)
-
-            if (cross is not None and (idx_a, k) not in fixed and _line_distance(end, host.start, host.end) <= reach
+            if (cross is not None and (idx_a, k) not in fixed and _dist(end, cross) <= cap
+                    and _line_distance(end, host.start, host.end) <= host.thickness / 2 + tol
                     and -tol <= _param_along(end, host.start, host.end) <= host.length + tol):
                 ends[idx_a][k] = cross
                 fixed.add((idx_a, k))
@@ -725,18 +876,67 @@ def _is_end_cap(face: Segment2D, wall: _WallAxis, rules: RecognitionRules) -> bo
             and min(_dist(_mid(face.start, face.end), end) for end in (wall.start, wall.end)) <= tol)
 
 
-def _wall_outline(wall: _WallAxis) -> Ring:
-    """conturul dreptunghiular al peretelui (axă ± grosime / 2)"""
-    n_x = -(wall.end[1] - wall.start[1]) / wall.length * wall.thickness / 2
-    n_y = (wall.end[0] - wall.start[0]) / wall.length * wall.thickness / 2
-    return ((wall.start[0] + n_x, wall.start[1] + n_y), (wall.end[0] + n_x, wall.end[1] + n_y),
-            (wall.end[0] - n_x, wall.end[1] - n_y), (wall.start[0] - n_x, wall.start[1] - n_y))
+def _band(wall: _WallAxis, par_0: float, par_1: float, half_width: float) -> Ring:
+    """dreptunghiul de pe axa peretelui între coordonatele par_0, par_1 [mm], lățime 2 * half_width [mm]"""
+    n_x = -(wall.end[1] - wall.start[1]) / wall.length * half_width
+    n_y = (wall.end[0] - wall.start[0]) / wall.length * half_width
+    p_0, p_1 = _point_at(wall, par_0), _point_at(wall, par_1)
+    return ((p_0[0] + n_x, p_0[1] + n_y), (p_1[0] + n_x, p_1[1] + n_y),
+            (p_1[0] - n_x, p_1[1] - n_y), (p_0[0] - n_x, p_0[1] - n_y))
 
 
-def _inside_wall(face: Segment2D, wall: _WallAxis, tolerance: float) -> bool:
-    """True dacă fața este complet în conturul peretelui lărgit cu tolerance [mm] (zonă de nod)"""
-    outline = _wall_outline(wall)
-    return all(_position(pnt, outline, tolerance) >= 0 for pnt in (face.start, face.end))
+def _inside(face: Segment2D, zone: Ring, tolerance: float) -> bool:
+    """True dacă ambele capete ale feței sunt în zona convexă lărgită cu tolerance [mm]"""
+    return all(_position(pnt, zone, tolerance) >= 0 for pnt in (face.start, face.end))
+
+
+def _door_zones(walls: list[_WallAxis], rules: RecognitionRules) -> list[Ring]:
+    """Zonele golurilor de ușă / fereastră: între capetele a doi pereți coliniari vecini (_collinear)
+    cu golul g > point_tolerance, lărgite perpendicular pe axă cu g + grosimea / 2 [mm] spre ambele
+    părți (zona în care se rotește canatul). Pentru fiecare capăt se ia doar vecinul cel mai apropiat."""
+    zones = []
+
+    for wall_a in (wall for wall in walls if wall.length > _EPS):
+        nearest: dict[str, tuple[float, float]] = {}
+
+        for wall_b in walls:
+            if wall_b is wall_a or wall_b.length <= _EPS or not _collinear(wall_a, wall_b, rules):
+                continue
+
+            gap  = _gap_between(wall_a, wall_b, rules.point_tolerance)
+            side = None if gap is None else ("end" if gap[0] >= wall_a.length - _EPS else "start")
+
+            if side is not None and (side not in nearest or gap[1] - gap[0] < nearest[side][1] - nearest[side][0]):
+                nearest[side] = gap
+
+        for gap in nearest.values():
+            zones.append(_band(wall_a, gap[0], gap[1], gap[1] - gap[0] + wall_a.thickness / 2))
+
+    return zones
+
+
+def _consumed(face: Segment2D, walls: list[_WallAxis], index: _GridIndex, rules: RecognitionRules) -> bool:
+    """fața nefolosită este un capăt de perete sau stă în zona unui nod (în conturul unui perete)"""
+    tol = rules.point_tolerance
+
+    for idx in index.query(_box_around((face.start, face.end), rules.wall_max_thickness)):
+        wall = walls[idx]
+        if wall.length > _EPS and _inside(face, _band(wall, 0.0, wall.length, wall.thickness / 2), tol):
+            return True
+
+    return False
+
+
+def _unpaired_warnings(faces: list[Segment2D]) -> list[str]:
+    """avertismentele „linie fără față opusă”; peste _MAX_LISTED_WARNINGS se agregă într-unul singur"""
+    if len(faces) <= _MAX_LISTED_WARNINGS:
+        return [f"Perete: linie fără față opusă pe layerul '{face.layer}', de la {_fmt(face.start)} "
+                f"la {_fmt(face.end)} (lungime {face.length:.0f} mm), ignorată." for face in faces]
+
+    layers = ", ".join(f"'{layer}'" for layer in sorted({face.layer for face in faces}))
+    listed = "; ".join(f"{_fmt(face.start)}-{_fmt(face.end)}" for face in faces[:_LISTED_POSITIONS])
+    return [f"Perete: {len(faces)} linii fără față opusă pe layerele {layers}, ignorate. "
+            f"Primele {_LISTED_POSITIONS}: {listed}."]
 
 
 def _wall_faces(ent: _Entities, rules: RecognitionRules, warnings: list[str]) -> tuple[list[_WallAxis], list[Segment2D]]:
@@ -766,10 +966,11 @@ def _recognize_walls(drawing: Drawing2D, layers: set[str], rules: RecognitionRul
     -   laturile celorlalte contururi (de ex. conturul exterior și cel interior al unui inel de pereți),
         poliliniile deschise și segmentele libere sunt fețe care se împerechează pe fiecare layer
         (_pair_faces);
-    -   pereții coliniari consecutivi se unesc (_merge_walls), la fel cei separați doar de capătul
-        unui perete în T (_bridge_t_gaps); apoi axele se închid în nodurile L și T (_join_corners);
-    -   fețele nefolosite care sunt capete de perete (_is_end_cap) sau se află în zona unui nod
-        (_inside_wall) se consumă fără avertisment; restul devin avertismente.
+    -   pereții coliniari consecutivi se unesc (_merge_walls), la fel cei separați doar de un perete
+        în nod T sau X (_bridge_gaps); apoi axele se închid în nodurile L și T (_join_corners);
+    -   fețele nefolosite care sunt capete de perete (_is_end_cap), stau în zona unui nod (_consumed)
+        sau într-un gol de ușă / fereastră (_door_zones, de ex. simbolul canatului) se ignoră fără
+        avertisment; restul devin avertismente (agregate peste _MAX_LISTED_WARNINGS).
     """
     ent = _collect(drawing, layers, rules.point_tolerance, _LABEL["wall"], warnings)
     walls, faces = _wall_faces(ent, rules, warnings)
@@ -780,15 +981,21 @@ def _recognize_walls(drawing: Drawing2D, layers: set[str], rules: RecognitionRul
         walls.extend(paired)
         unpaired.extend(rest)
 
-    walls    = _merge_walls(_bridge_t_gaps(_merge_walls(walls, rules), rules), rules)
-    unpaired = [face for face in unpaired if not any(_is_end_cap(face, wall, rules) for wall in walls)]
+    walls    = _merge_walls(_bridge_gaps(_merge_walls(walls, rules), rules), rules)
+    index    = _wall_index(walls, rules)
+    unpaired = [face for face in unpaired
+                if not any(_is_end_cap(face, walls[idx], rules)
+                           for idx in index.query(_box_around((face.start, face.end), rules.point_tolerance)))]
     walls    = _join_corners(walls, rules)
+    index    = _wall_index(walls, rules)
+    unpaired = [face for face in unpaired if not _consumed(face, walls, index, rules)]
 
-    for face in unpaired:
-        if not any(_inside_wall(face, wall, rules.point_tolerance) for wall in walls):
-            warnings.append(f"Perete: linie fără față opusă pe layerul '{face.layer}', de la {_fmt(face.start)} "
-                            f"la {_fmt(face.end)} (lungime {face.length:.0f} mm), ignorată.")
+    if unpaired:
+        zones    = _door_zones(walls, rules)
+        unpaired = [face for face in unpaired
+                    if not any(_inside(face, zone, rules.point_tolerance) for zone in zones)]
 
+    warnings.extend(_unpaired_warnings(unpaired))
     return walls
 
 
@@ -828,28 +1035,6 @@ def _recognize_beams(drawing: Drawing2D, layers: set[str], rules: RecognitionRul
 # ----------------------------------------------------------------------------------------------
 # Plăci
 # ----------------------------------------------------------------------------------------------
-
-def _segment_distance(pnt: Point2, p_a: Point2, p_b: Point2) -> float:
-    """distanța de la pnt la segmentul p_a - p_b [mm]"""
-    length_sq = (p_b[0] - p_a[0]) ** 2 + (p_b[1] - p_a[1]) ** 2
-
-    if length_sq < _EPS:
-        return _dist(pnt, p_a)
-
-    par = ((pnt[0] - p_a[0]) * (p_b[0] - p_a[0]) + (pnt[1] - p_a[1]) * (p_b[1] - p_a[1])) / length_sq
-    par = min(1.0, max(0.0, par))
-    return _dist(pnt, (p_a[0] + par * (p_b[0] - p_a[0]), p_a[1] + par * (p_b[1] - p_a[1])))
-
-
-def _position(pnt: Point2, polygon: Ring, tolerance: float) -> int:
-    """poziția punctului față de poligon: 1 = în interior, 0 = pe contur (în tolerance [mm]), -1 = în exterior"""
-    pts = list(polygon)
-
-    if any(_segment_distance(pnt, p_1, p_2) <= tolerance for p_1, p_2 in zip(pts, pts[1:] + pts[:1])):
-        return 0
-
-    return 1 if _point_in_polygon(pnt, polygon) else -1
-
 
 def _contains(outer: Ring, inner: Ring, tolerance: float) -> bool:
     """True dacă inner are aria mai mică, niciun vârf în exteriorul lui outer și cel puțin unul în interior

@@ -29,6 +29,9 @@ Ești orchestratorul proiectului. Coordonezi subagenții din `.claude/agents/`, 
 ## Proiecte existente în NewAll
 - `ReinforcementExamples/SeismicColumn` - stâlp armat automat conform SR EN 1992-1-1 și P100-1/2013, cu eforturi citite din CSV.
   Valorile din normă folosite acolo sunt NEVALIDATE (vezi `.claude/skills/engineering-calcs/references/`).
+- `StructuralModeling/FromDrawing` - modelare 3D (stâlpi, pereți, grinzi, plăci) din planșe de arhitectură
+  importate în Allplan sau DXF, recunoaștere după layere; separat de armare. Contractul comun cu modulele
+  de armare: `StructuralModel.py` (armarea depinde de el, niciodată invers).
 
 ## Când delegi
 - Sarcină mică (sub ~20 de linii, un fișier): o faci singur. Nu lansa subagenți pentru ea.

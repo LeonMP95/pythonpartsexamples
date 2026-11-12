@@ -8,6 +8,7 @@ este dată explicit în test.
 from __future__ import annotations
 
 import math
+import time
 import unittest
 
 from StructuralModeling.FromDrawing.Model2D import Drawing2D, Hatch2D, Polyline2D, Segment2D
@@ -456,6 +457,113 @@ class TestLayersAndOrdering(unittest.TestCase, AssertMixin):
                     segments  = [seg((200, 200), (200, 5000), BEAM)])
 
         self.assertEqual(model.summary(), "1 stâlpi, 1 pereți, 1 grinzi, 1 plăci, 0 avertismente")
+
+
+def wall_grid_segments(nodes: int, pitch: float = 4000.0, half: float = 125.0) -> list[Segment2D]:
+    """grilă de pereți desenați prin fețe întrerupte la fiecare nod: 4 * nodes * (nodes - 1) segmente"""
+    segments = []
+
+    for i in range(nodes):
+        for j in range(nodes - 1):
+            low, high, fixed = j * pitch + half, (j + 1) * pitch - half, i * pitch
+
+            for off in (-half, half):
+                segments.append(seg((low, fixed + off), (high, fixed + off)))
+                segments.append(seg((fixed + off, low), (fixed + off, high)))
+
+    return segments
+
+
+def rotated_rect(center_start, length, width, angle_deg) -> tuple:
+    """dreptunghi cu axa de la center_start, de lungime length, rotit cu angle_deg"""
+    ang = math.radians(angle_deg)
+    u_x, u_y = math.cos(ang), math.sin(ang)
+    n_x, n_y = -u_y * width / 2, u_x * width / 2
+    x_0, y_0 = center_start
+    x_1, y_1 = x_0 + u_x * length, y_0 + u_y * length
+    return ((x_0 - n_x, y_0 - n_y), (x_1 - n_x, y_1 - n_y), (x_1 + n_x, y_1 + n_y), (x_0 + n_x, y_0 + n_y))
+
+
+class TestWallJunctionsExtra(unittest.TestCase, AssertMixin):
+
+    def test_cross_junctions_unify_axes_in_both_directions(self):
+        model = run(segments = wall_grid_segments(3))
+
+        self.assertEqual(model.warnings, [])
+        self.assertEqual(len(model.walls), 6)                 # 3 axe orizontale + 3 verticale, întregi
+
+        for wall in model.walls:
+            self.assertAlmostEqual(math.dist(wall.start, wall.end), 8000.0, delta = TOL_MM)
+
+    def test_near_parallel_wall_at_3_degrees_is_not_extended(self):
+        slanted = rotated_rect((1000, 100), 3000, 250, 3.0)
+        model   = run(polylines = [Polyline2D(rect(0, -125, 5000, 125), True, WALL),
+                                   Polyline2D(slanted, True, WALL)])
+
+        self.assertEqual(len(model.walls), 2)
+        host  = [w for w in model.walls if abs(w.start[1]) < TOL_MM and abs(w.end[1]) < TOL_MM][0]
+        other = [w for w in model.walls if w is not host][0]
+        self.assertWall(host, (0, 0), (5000, 0), 250)
+        expected_end = (1000 + 3000 * math.cos(math.radians(3)), 100 + 3000 * math.sin(math.radians(3)))
+        self.assertWall(other, (1000, 100), expected_end, 250, delta = 1e-6)
+
+    def test_door_symbol_on_wall_layer_is_ignored(self):
+        radius, hinge = 900.0, (2000.0, 125.0)
+        arc = [(hinge[0] + radius * math.cos(math.radians(a)), hinge[1] + radius * math.sin(math.radians(a)))
+               for a in range(0, 91, 6)]
+        door = [seg(hinge, (2900, 125))] + [seg(p_1, p_2) for p_1, p_2 in zip(arc, arc[1:])]
+        model = run(segments = [seg((0, 0), (2000, 0)), seg((0, 250), (2000, 250)),
+                                seg((2900, 0), (5000, 0)), seg((2900, 250), (5000, 250)),
+                                seg((2000, 0), (2000, 250)), seg((2900, 0), (2900, 250)), *door])
+
+        self.assertEqual(len(model.walls), 2)
+        self.assertEqual(model.warnings, [], "\n".join(model.warnings))
+
+    def test_many_unpaired_lines_give_one_aggregated_warning(self):
+        model = run(segments = [seg((i * 3000, i * 3000), (i * 3000 + 1000, i * 3000)) for i in range(12)])
+
+        self.assertEqual(model.walls, [])
+        self.assertEqual(len(model.warnings), 1)
+        self.assertIn("12 linii fără față opusă", model.warnings[0])
+        self.assertEqual(model.warnings[0].count(")-("), 5)
+
+    def test_ten_unpaired_lines_are_listed_separately(self):
+        model = run(segments = [seg((i * 3000, i * 3000), (i * 3000 + 1000, i * 3000)) for i in range(10)])
+
+        self.assertEqual(len(model.warnings), 10)
+
+
+class TestColumnsTouching(unittest.TestCase):
+
+    def test_two_columns_sharing_a_side_drawn_as_segments_give_warnings_only(self):
+        """Comportament documentat: latura comună creează ramificații, iar înlănțuirea nu ghicește
+        cum se împart segmentele → niciun stâlp, avertismente pentru toate segmentele."""
+        pts = [((0, 0), (400, 0)), ((400, 0), (400, 400)), ((400, 400), (0, 400)), ((0, 400), (0, 0)),
+               ((400, 0), (800, 0)), ((800, 0), (800, 400)), ((800, 400), (400, 400))]
+        model = run(segments = [seg(p_1, p_2, COL) for p_1, p_2 in pts])
+
+        self.assertEqual(model.columns, [])
+        self.assertEqual(len(model.warnings), 7)
+        self.assertTrue(all(warn.startswith("Stâlp:") for warn in model.warnings))
+
+
+class TestSlowPerformance(unittest.TestCase):
+
+    MAX_SECONDS = 5.0
+
+    def test_slow_wall_grid_5040_segments_under_5_seconds(self):
+        segments = wall_grid_segments(36)
+        self.assertEqual(len(segments), 5040)
+
+        start   = time.perf_counter()
+        model   = run(segments = segments)
+        elapsed = time.perf_counter() - start
+
+        self.assertEqual(model.warnings, [])
+        self.assertEqual(len(model.walls), 72)
+        total = sum(math.dist(wall.start, wall.end) for wall in model.walls)
+        self.assertAlmostEqual(total, 2 * 36 * 35 * 4000.0, delta = 1.0)
+        self.assertLess(elapsed, self.MAX_SECONDS)
 
 
 if __name__ == "__main__":

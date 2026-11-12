@@ -58,3 +58,5 @@ CLAUDE.md                  regulile orchestratorului și ale proiectului
   - comenzi de test/lint/verificare completate; deploy = copiere în `Usr\Local`;
   - fluxul git adaptat sesiunilor cloud (branch `claude/...` desemnat; PR doar la cerere);
   - referințele `engineering-calcs` precompletate cu valorile din cod, marcate `NEVALIDAT`.
+- 2026-11-12: regulile de blocare din `settings.json` pentru exemplele ALLPLAN ancorate la rădăcina proiectului
+  (`/PythonPartsExampleScripts/**`); varianta cu `./` se raporta la folderul curent și bloca scrierea în `NewAll/`.

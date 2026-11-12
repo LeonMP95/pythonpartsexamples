@@ -323,6 +323,86 @@ class TestHatchesAndBlocks(DxfSourceTestBase):
         _point_close(self, drawing.segments[0].start, (10.0, 0.0))
 
 
+class TestComplexityLimits(DxfSourceTestBase):
+    """Limitele globale de complexitate și ciclurile de blocuri (protecție la planșe malițioase)"""
+
+    def test_self_inserting_block_is_skipped_with_warning(self):
+        doc = self.new_doc()
+        block = doc.blocks.new("BUCLA")
+        block.add_line((0, 0), (100, 0))
+        block.add_blockref("BUCLA", (10, 10))
+        doc.modelspace().add_blockref("BUCLA", (0, 0), dxfattribs = {"layer": "PERETI"})
+
+        drawing = read_dxf(self.save(doc))
+
+        self.assertEqual(len(drawing.segments), 1)
+        self.assertTrue(any("BUCLA" in warning for warning in drawing.warnings), drawing.warnings)
+
+    def test_indirect_block_cycle_is_skipped(self):
+        doc = self.new_doc()
+        block_a = doc.blocks.new("A")
+        block_b = doc.blocks.new("B")
+        block_a.add_line((0, 0), (100, 0))
+        block_a.add_blockref("B", (0, 0))
+        block_b.add_line((0, 0), (0, 100))
+        block_b.add_blockref("A", (0, 0))
+        doc.modelspace().add_blockref("A", (0, 0))
+
+        drawing = read_dxf(self.save(doc))
+
+        self.assertEqual(len(drawing.segments), 2)
+        self.assertTrue(any("sărite" in warning for warning in drawing.warnings), drawing.warnings)
+
+    def test_exponential_block_explosion_stops_quickly(self):
+        doc = self.new_doc()
+        base = doc.blocks.new("N0")
+        for i in range(10):
+            base.add_line((i, 0), (i, 100))
+        for level in range(1, 8):
+            block = doc.blocks.new(f"N{level}")
+            for i in range(10):
+                block.add_blockref(f"N{level - 1}", (i * 1000, 0))
+        doc.modelspace().add_blockref("N7", (0, 0))
+        path = self.save(doc)
+
+        start = time.perf_counter()
+        with self.assertRaises(DxfSourceError) as ctx:
+            read_dxf(path, max_entities = 20_000)
+        elapsed = time.perf_counter() - start
+
+        self.assertIn("prea complexă", str(ctx.exception))
+        self.assertLess(elapsed, 5.0)
+
+    def test_minsert_counts_every_copy(self):
+        doc = self.new_doc()
+        block = doc.blocks.new("STALP")
+        block.add_lwpolyline([(0, 0), (400, 0), (400, 400), (0, 400)], close = True)
+        insert = doc.modelspace().add_blockref("STALP", (0, 0))
+        insert.grid(size = (100, 100), spacing = (1000, 1000))
+
+        with self.assertRaises(DxfSourceError):
+            read_dxf(self.save(doc), max_entities = 1000)
+
+    def test_point_limit(self):
+        doc = self.new_doc()
+        msp = doc.modelspace()
+        for i in range(20):
+            msp.add_circle((i * 1000, 0), 400)
+
+        with self.assertRaises(DxfSourceError):
+            read_dxf(self.save(doc), max_total_points = 100)
+
+    def test_limits_do_not_affect_normal_drawing(self):
+        doc = self.new_doc()
+        msp = doc.modelspace()
+        for i in range(200):
+            msp.add_line((i * 100, 0), (i * 100, 3000), dxfattribs = {"layer": "PERETI"})
+
+        drawing = read_dxf(self.save(doc))
+
+        self.assertEqual(len(drawing.segments), 200)
+
+
 class TestInvalidInput(unittest.TestCase):
 
     def setUp(self):

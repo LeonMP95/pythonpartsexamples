@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import traceback
 
 from dataclasses import dataclass
 from typing import Any
@@ -47,7 +48,9 @@ SOURCE_MODEL          = 1
 SOURCE_DXF            = 2
 DEFAULT_RULES_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "RulesDefault.json")
 MAX_WARNINGS_IN_BOX   = 15
-DXF_PARAMETERS        = ("Source", "DxfFile")
+PREVIEW_LEVEL_NAME    = "-"          # numele etajului nu influențează recunoașterea pentru previzualizare
+UNEXPECTED_ERROR_TEXT = ("Eroare neașteptată: elementele pot fi create doar parțial sau deloc. "
+                         "Detaliile sunt în trace.")
 
 
 class InputError(ValueError):
@@ -109,18 +112,38 @@ def read_palette(build_ele: Any) -> PaletteInput:
                                                       slabs   = bool(build_ele.CreateSlabs.value)))
 
 
+def rules_file_path(palette: PaletteInput) -> str:
+    """Fișierul de reguli ales sau cel implicit de lângă script
+
+    Raises:
+        RulesError: fișierul implicit lipsește (folderul data/ nu a fost copiat)
+    """
+    if palette.rules_file:
+        return palette.rules_file
+
+    if not os.path.isfile(DEFAULT_RULES_FILE):
+        raise RulesError(f"Fișierul de reguli implicit lipsește: {DEFAULT_RULES_FILE}. La instalare copiați și "
+                         f"folderul data/ lângă StructuralFromDrawing.py sau alegeți un fișier de reguli în paletă.")
+
+    return DEFAULT_RULES_FILE
+
+
+def apply_overrides(rules: RecognitionRules, palette: PaletteInput) -> RecognitionRules:
+    """Suprascrierile > 0 din paletă (lățime / înălțime grindă, grosime placă)"""
+    overrides = {key: value for key, value in (("beam_width", palette.beam_width),
+                                               ("beam_depth", palette.beam_depth),
+                                               ("slab_thickness", palette.slab_thickness)) if value > 0}
+
+    return dataclasses.replace(rules, **overrides) if overrides else rules
+
+
 def effective_rules(palette: PaletteInput) -> RecognitionRules:
     """Regulile din fișier (gol = implicit), cu suprascrierile > 0 din paletă
 
     Raises:
         RulesError: fișier de reguli lipsă sau invalid
     """
-    rules     = load_rules(palette.rules_file or DEFAULT_RULES_FILE)
-    overrides = {key: value for key, value in (("beam_width", palette.beam_width),
-                                               ("beam_depth", palette.beam_depth),
-                                               ("slab_thickness", palette.slab_thickness)) if value > 0}
-
-    return dataclasses.replace(rules, **overrides) if overrides else rules
+    return apply_overrides(load_rules(rules_file_path(palette)), palette)
 
 
 def level_from_palette(palette: PaletteInput) -> Level:
@@ -147,11 +170,6 @@ def read_dxf_drawing(path: str) -> Drawing2D:
     return read_dxf(path)
 
 
-def recognize_model(drawing: Drawing2D, palette: PaletteInput) -> StructuralModel:
-    """Recunoașterea elementelor pentru etajul din paletă (calculul este în Recognition)"""
-    return recognize(drawing, effective_rules(palette), level_from_palette(palette))
-
-
 def format_report(level_name: str, drawing: Drawing2D, model: StructuralModel, creation: CreationReport) -> str:
     """Raportul final: rezumatul modelului, elementele create și toate avertismentele"""
     created  = ", ".join(f"{count} {name}" for name, count in creation.counts.items())
@@ -176,11 +194,86 @@ def short_report(report: str) -> str:
     return "\n".join(lines[:limit] + [f"  ... încă {len(lines) - limit} avertismente (vezi trace)"])
 
 
+def file_key(path: str) -> tuple | None:
+    """(cale absolută, mtime, mărime) sau None dacă fișierul nu poate fi citit"""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+
+    return os.path.abspath(path), stat.st_mtime_ns, stat.st_size
+
+
+class InputCache:
+    """Memorează planșa DXF, regulile și modelul recunoscut, ca previzualizarea să nu recitească
+    fișierele și să nu repete recunoașterea la fiecare schimbare din paletă"""
+
+    def __init__(self):
+        self.dxf_key  : tuple | None = None
+        self.dxf      : Drawing2D | None = None
+        self.rules_key: tuple | None = None
+        self.rules    : RecognitionRules | None = None
+        self.model_key: tuple | None = None
+        self.model_drawing: Drawing2D | None = None
+        self.model    : StructuralModel | None = None
+
+    def dxf_drawing(self, path: str) -> Drawing2D:
+        """Planșa DXF, recitită doar dacă s-au schimbat calea, data modificării sau mărimea
+
+        Raises:
+            InputError, DxfSourceError
+        """
+        key = file_key(path) if path else None
+
+        if key is None or key != self.dxf_key or self.dxf is None:
+            self.dxf_key, self.dxf = None, None
+            drawing = read_dxf_drawing(path)
+            self.dxf_key, self.dxf = key, drawing
+
+        return self.dxf
+
+    def recognition_rules(self, palette: PaletteInput) -> RecognitionRules:
+        """Regulile (recitite doar dacă s-a schimbat fișierul), cu suprascrierile din paletă
+
+        Raises:
+            RulesError
+        """
+        path = rules_file_path(palette)
+        key  = file_key(path)
+        key  = key[:2] if key else None
+
+        if key is None or key != self.rules_key or self.rules is None:
+            self.rules_key, self.rules = None, None
+            rules = load_rules(path)
+            self.rules_key, self.rules = key, rules
+
+        return apply_overrides(self.rules, palette)
+
+    def preview_model(self, drawing: Drawing2D, palette: PaletteInput) -> StructuralModel:
+        """Modelul pentru previzualizare; recunoașterea se repetă doar dacă s-au schimbat planșa,
+        regulile (cu suprascrieri) sau cotele etajului (nu și numele etajului)"""
+        rules = self.recognition_rules(palette)
+        key   = (rules, palette.level_bottom, palette.storey_height)
+
+        if self.model is None or drawing is not self.model_drawing or key != self.model_key:
+            level      = Level(palette.level_name or PREVIEW_LEVEL_NAME, palette.level_bottom,
+                               palette.level_bottom + palette.storey_height)
+            self.model = None
+            model      = recognize(drawing, rules, level)
+            self.model_key, self.model_drawing, self.model = key, drawing, model
+
+        return self.model
+
+
 #----------------- interactorul
 
 
 class StructuralFromDrawingInteractor(BaseInteractor):
-    """Selecție (sau DXF) -> recunoaștere -> previzualizare -> creare la apăsarea butonului"""
+    """Selecție (sau DXF) -> recunoaștere -> previzualizare -> creare la apăsarea butonului
+
+    Orice excepție neprevăzută este prinsă aici (limita cu Allplan): textul complet merge în trace,
+    iar interactorul rămâne utilizabil.
+    """
 
     def __init__(self, coord_input: Any, build_ele_list: list, build_ele_composite: Any, control_props_list: list):
         self.coord_input            = coord_input
@@ -188,6 +281,7 @@ class StructuralFromDrawingInteractor(BaseInteractor):
         self.post_element_selection = None
         self.drawing: Drawing2D | None = None
         self.preview_elements: list = []
+        self.cache                  = InputCache()
 
         self.palette_service = BuildingElementPaletteService(build_ele_list, build_ele_composite,
                                                              self.build_ele.script_name, control_props_list,
@@ -236,44 +330,51 @@ class StructuralFromDrawingInteractor(BaseInteractor):
 
         elements = self.post_element_selection.GetSelectedElements(self.document)
 
-        if not elements:
-            self.start_input()
-            return True
+        if elements:
+            try:
+                self.drawing = drawing_from_elements(elements, self.coord_input.GetInputViewDocumentID())
+            except Exception:                   # pylint: disable=broad-except - limita cu Allplan
+                print(traceback.format_exc())
+                print("Selecția nu a putut fi convertită; selectați din nou.")
+                self.drawing = None
+            else:
+                print(f"Planșă selectată: {len(self.drawing.segments)} segmente, {len(self.drawing.polylines)} "
+                      f"polilinii, {len(self.drawing.hatches)} hașuri, layere: {', '.join(sorted(self.drawing.layers))}")
 
-        self.drawing = drawing_from_elements(elements, self.coord_input.GetInputViewDocumentID())
+            self.update_preview()
 
-        print(f"Planșă selectată: {len(self.drawing.segments)} segmente, {len(self.drawing.polylines)} polilinii, "
-              f"{len(self.drawing.hatches)} hașuri, layere: {', '.join(sorted(self.drawing.layers))}")
-
-        self.update_preview()
         self.start_input()          # o nouă selecție înlocuiește planșa curentă
 
         return True
 
     def load_dxf_for_preview(self):
-        """Citește DXF-ul pentru previzualizare; erorile merg doar în trace"""
+        """Citește DXF-ul pentru previzualizare (din cache dacă fișierul nu s-a schimbat); erorile merg în trace"""
         self.drawing = None
 
         try:
-            self.drawing = read_dxf_drawing(read_palette(self.build_ele).dxf_file)
+            self.drawing = self.cache.dxf_drawing(read_palette(self.build_ele).dxf_file)
         except INPUT_ERRORS as err:
             print(f"DXF: {err}")
+        except Exception:                       # pylint: disable=broad-except - limita cu Allplan
+            print(traceback.format_exc())
 
         self.update_preview()
 
     def update_preview(self):
-        """Recunoaște planșa curentă și pregătește previzualizarea (fără ferestre de mesaj)"""
+        """Pregătește previzualizarea din modelul memorat (fără ferestre de mesaj)"""
         self.preview_elements = []
 
         if self.drawing is not None:
-            palette = read_palette(self.build_ele)
-
             try:
-                model = recognize_model(self.drawing, palette)
+                palette               = read_palette(self.build_ele)
+                model                 = self.cache.preview_model(self.drawing, palette)
+                self.preview_elements = build_elements(model, self.document, palette.options).elements
             except INPUT_ERRORS as err:
                 print(f"Previzualizare imposibilă: {err}")
+            except Exception:                   # pylint: disable=broad-except - limita cu Allplan
+                print(traceback.format_exc())
+                self.preview_elements = []
             else:
-                self.preview_elements = build_elements(model, self.document, palette.options).elements
                 print(f"Previzualizare: {model.summary()}")
 
         self.draw_preview()
@@ -290,18 +391,18 @@ class StructuralFromDrawingInteractor(BaseInteractor):
             INPUT_ERRORS: date de intrare invalide (nimic nu se creează)
         """
         palette = read_palette(self.build_ele)
-        drawing = read_dxf_drawing(palette.dxf_file) if palette.source == SOURCE_DXF else self.drawing
+        drawing = self.cache.dxf_drawing(palette.dxf_file) if palette.source == SOURCE_DXF else self.drawing
 
         if drawing is None:
             raise InputError("Selectați întâi elementele 2D ale planșei")
 
-        model    = recognize_model(drawing, palette)
+        model    = recognize(drawing, self.cache.recognition_rules(palette), level_from_palette(palette))
         creation = create_in_document(model, self.document, palette.options)
 
         return format_report(palette.level_name, drawing, model, creation)
 
     def on_control_event(self, event_id: int):
-        """Butonul „Recunoaște și creează”: creare + raport în trace și fereastră de mesaj"""
+        """Butonul „Recunoaște și creează”: creare + raport în trace și o singură fereastră de mesaj"""
         if event_id != CREATE_EVENT_ID:
             return
 
@@ -309,6 +410,9 @@ class StructuralFromDrawingInteractor(BaseInteractor):
             report = self.create_elements()
         except INPUT_ERRORS as err:
             report = f"Elementele nu au fost create: {err}"
+        except Exception:                       # pylint: disable=broad-except - limita cu Allplan
+            print(traceback.format_exc())
+            report = UNEXPECTED_ERROR_TEXT
 
         print(report)
         AllplanUtil.ShowMessageBox(short_report(report), AllplanUtil.MB_OK)
@@ -318,14 +422,15 @@ class StructuralFromDrawingInteractor(BaseInteractor):
         self.start_input(remove_running_selection = True)
 
     def modify_element_property(self, page: int, name: str, value: Any):
-        """Schimbare în paletă: actualizează previzualizarea"""
+        """Schimbare în paletă: actualizează previzualizarea (recunoașterea se repetă doar dacă e nevoie)"""
         update_palette = self.palette_service.modify_element_property(page, name, value)
 
         if name == "Source":
-            self.drawing = None
+            self.drawing          = None
+            self.preview_elements = []
             self.start_input(remove_running_selection = True)
 
-        if name in DXF_PARAMETERS and read_palette(self.build_ele).source == SOURCE_DXF:
+        if name in ("Source", "DxfFile") and read_palette(self.build_ele).source == SOURCE_DXF:
             self.load_dxf_for_preview()
         else:
             self.update_preview()
@@ -351,5 +456,8 @@ class StructuralFromDrawingInteractor(BaseInteractor):
 
         if self.post_element_selection is not None:
             AllplanIFW.InputFunctionStarter.RemoveFunction()
+            self.post_element_selection = None
+
+        self.preview_elements = []
 
         return True

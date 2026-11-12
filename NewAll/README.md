@@ -1,7 +1,12 @@
 # NewAll
 
-Fișierele noi adăugate în acest repo: prototipul **Stâlp armat EC2 + P100-1**
-(vezi `PythonPartsExampleScripts/ReinforcementExamples/SeismicColumn/README.md`).
+Fișierele noi adăugate în acest repo:
+
+- **Stâlp armat EC2 + P100-1** (prototip)
+  (vezi `PythonPartsExampleScripts/ReinforcementExamples/SeismicColumn/README.md`).
+- **Structură din planșă** (prototip): recunoaște stâlpi, pereți, grinzi și plăci din
+  planșe DWG/PDF importate în Allplan sau DXF și le creează ca elemente native
+  (vezi `PythonPartsExampleScripts/StructuralModeling/FromDrawing/README.md`).
 
 Structura de directoare este aceeași ca a exemplelor PythonParts, ca importurile
 și calea scriptului din fișierul `.pyp` să funcționeze fără modificări.
