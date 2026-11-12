@@ -5,6 +5,7 @@
     {"pattern": "*STÂLP*",  "element": "column"},
     {"pattern": "*COLUMN*", "element": "column"},
     {"pattern": "*GRIND*",  "element": "beam"},
+    {"pattern": "*GRINZ*",  "element": "beam"},
     {"pattern": "*BEAM*",   "element": "beam"},
     {"pattern": "*PLAC*",   "element": "slab"},
     {"pattern": "*SLAB*",   "element": "slab"},

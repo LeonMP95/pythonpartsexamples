@@ -505,21 +505,18 @@ def _pair_faces(faces: list[Segment2D], rules: RecognitionRules) -> tuple[list[_
     return walls, [face for idx, face in enumerate(faces) if idx not in used]
 
 
-def _wall_from_rectangle(contour: _Contour, rules: RecognitionRules, warnings: list[str]) -> _WallAxis | None:
-    """Perete dintr-un contur dreptunghiular: axa pe direcția lungă, grosimea = latura scurtă [mm]
+def _wall_from_rectangle(contour: _Contour, rect: _RectAxis, rules: RecognitionRules,
+                         warnings: list[str]) -> _WallAxis | None:
+    """Perete dintr-un contur dreptunghiular cu latura scurtă în [wall_min_thickness, wall_max_thickness]:
+    axa pe direcția lungă, grosimea = latura scurtă [mm]
 
-    Pătratele, laturile scurte în afara [wall_min_thickness, wall_max_thickness] și lungimile
-    sub wall_min_length devin avertismente.
+    Pătratele (direcție ambiguă) și lungimile sub wall_min_length devin avertismente.
     """
-    rect  = _rectangle_axis(contour.points, rules.parallel_tolerance_deg)
     where = f"pe layerul '{contour.layer}' din jurul {_fmt(_ring_center(contour.points))}"
 
     if rect.length - rect.width <= rules.point_tolerance:
         warnings.append(f"Perete: contur pătrat ({rect.width:.0f} x {rect.length:.0f} mm) {where}; "
                         f"direcția peretelui este ambiguă, ignorat.")
-    elif not rules.wall_min_thickness <= rect.width <= rules.wall_max_thickness:
-        warnings.append(f"Perete: contur dreptunghiular {where} cu latura mică {rect.width:.0f} mm, în afara "
-                        f"limitelor [{rules.wall_min_thickness:.0f}, {rules.wall_max_thickness:.0f}] mm, ignorat.")
     elif rect.length < rules.wall_min_length:
         warnings.append(f"Perete: contur dreptunghiular {where} cu lungimea {rect.length:.0f} mm, sub "
                         f"lungimea minimă {rules.wall_min_length:.0f} mm, ignorat.")
@@ -578,8 +575,9 @@ def _recognize_walls(drawing: Drawing2D, layers: set[str], rules: RecognitionRul
                      warnings: list[str]) -> list[_WallAxis]:
     """Regula 2 (pereți)
 
-    -   contururile dreptunghiulare fără goluri devin pereți direct (_wall_from_rectangle);
-    -   laturile celorlalte contururi, polilinii deschise și segmentele libere sunt fețe care se
+    -   contururile dreptunghiulare fără goluri, cu latura scurtă în [wall_min_thickness,
+        wall_max_thickness] [mm], devin pereți direct (_wall_from_rectangle);
+    -   laturile celorlalte contururi (de ex. conturul exterior și cel interior al unui inel de pereți), polilinii deschise și segmentele libere sunt fețe care se
         împerechează pe fiecare layer (_pair_faces); fețele fără pereche devin avertismente;
     -   pereții coliniari consecutivi se unesc (_merge_walls).
     """
@@ -588,8 +586,10 @@ def _recognize_walls(drawing: Drawing2D, layers: set[str], rules: RecognitionRul
     faces = list(ent.segments) + [seg for pts, layer in ent.paths for seg in _path_edges(pts, layer)]
 
     for contour in ent.contours:
-        if not contour.holes and _rectangle_axis(contour.points, rules.parallel_tolerance_deg) is not None:
-            wall = _wall_from_rectangle(contour, rules, warnings)
+        rect = None if contour.holes else _rectangle_axis(contour.points, rules.parallel_tolerance_deg)
+
+        if rect is not None and rules.wall_min_thickness <= rect.width <= rules.wall_max_thickness:
+            wall = _wall_from_rectangle(contour, rect, rules, warnings)
             walls.extend([wall] if wall is not None else [])
         else:
             for ring in (contour.points, *contour.holes):
