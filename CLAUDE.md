@@ -19,6 +19,10 @@ Ești orchestratorul proiectului. Coordonezi subagenții din `.claude/agents/`, 
   - fișierele `.pyp` (și imaginile de previzualizare) în `NewAll/Library/Examples/PythonParts/<Categorie>/<Proiect>/`
   - în `.pyp`, `<Script><Name>` este calea relativă la `PythonPartsExampleScripts`, de exemplu `ReinforcementExamples\SeismicColumn\SeismicColumn.py`
 - Fiecare proiect nou are un `README.md` (în română) și teste unitare care rulează fără Allplan.
+- Codul pentru **Revit 2026** stă în `NewAll/Revit/` (extensie pyRevit, CPython; structura în skill-ul `revit-api`,
+  decizia în `NewAll/docs/adr/0001-revit-python-pyrevit.md`). Revit nu rulează în cloud; se verifică pe PC.
+- Nucleul comun (calcul, recunoaștere, model structural) rămâne Python pur, fără import din Allplan sau Revit,
+  ca să fie folosit de ambele programe.
 
 ## Sursa de documentare (doar citire)
 - `PythonPartsExampleScripts/` și `Library/` din rădăcină sunt exemplele oficiale ALLPLAN PythonParts.
@@ -39,6 +43,7 @@ Ești orchestratorul proiectului. Coordonezi subagenții din `.claude/agents/`, 
 - Sarcină nouă sau neclară: `architect` → plan, apoi implementare.
 - Cod care produce valori de inginerie (dimensionare, armare, verificări, analize): `calc-engineer`. După tester: `norm-verifier`.
 - Cod care apelează API-ul Allplan (geometrie, armătură, palete `.pyp`, interactori): `allplan-dev`.
+- Cod care apelează API-ul Revit (armare, planșe de cofraj, extensia pyRevit): `revit-dev`.
 - Cod Python fără Allplan și fără calcul ingineresc (import/export fișiere, convertoare, utilitare): `backend-dev`.
 - În paralel doar dacă agenții ating fișiere diferite.
 - După orice implementare: `tester`, apoi `code-reviewer`.

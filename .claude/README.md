@@ -17,6 +17,7 @@ CLAUDE.md                  regulile orchestratorului și ale proiectului
   calc-engineer.md         Opus   · module de calcul ingineresc, cu surse
   norm-verifier.md         Opus   · doar citire + teste · verifică față de normă
   allplan-dev.md           Opus   · cod pe API-ul Allplan și palete .pyp (înlocuiește frontend-dev)
+  revit-dev.md             Opus   · stratul Revit 2026 (pyRevit, CPython): armare și planșe de cofraj
   backend-dev.md           Opus   · Python fără Allplan: import/export, convertoare
   tester.md                Sonnet · scrie și rulează teste
   code-reviewer.md         Sonnet · doar citire · review
@@ -27,6 +28,7 @@ CLAUDE.md                  regulile orchestratorului și ale proiectului
 .claude/skills/            cunoștințe comune
   project-conventions/     structură NewAll, denumiri, stil
   allplan-api/             cum se folosesc exemplele ALLPLAN ca documentație (nou)
+  revit-api/               structura NewAll/Revit, pyRevit CPython, Rebar API, cofraje (nou)
   architecture-docs/       șabloane de plan și ADR
   git-workflow/            branch-uri, commit-uri, PR
   definition-of-done/      când e o sarcină gata
@@ -60,3 +62,5 @@ CLAUDE.md                  regulile orchestratorului și ale proiectului
   - referințele `engineering-calcs` precompletate cu valorile din cod, marcate `NEVALIDAT`.
 - 2026-11-12: regulile de blocare din `settings.json` pentru exemplele ALLPLAN ancorate la rădăcina proiectului
   (`/PythonPartsExampleScripts/**`); varianta cu `./` se raporta la folderul curent și bloca scrierea în `NewAll/`.
+- 2026-11-22: agent nou `revit-dev` și skill nou `revit-api` pentru modulele Revit 2026 (pyRevit + CPython,
+  decizie în `NewAll/docs/adr/0001-revit-python-pyrevit.md`).
