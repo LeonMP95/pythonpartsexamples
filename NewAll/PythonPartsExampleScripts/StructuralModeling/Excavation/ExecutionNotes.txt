@@ -1,0 +1,19 @@
+# Note de execuție implicite pentru planul de săpătură.
+# Fișierul se poate edita: fiecare paragraf (separat prin rând gol) devine o notă numerotată pe planșă.
+# Rândurile care încep cu "#" sunt comentarii și nu apar pe planșă. Codificare: UTF-8. Mărime maximă: 100 kB.
+
+Cotele de nivel sunt în metri (m), raportate la cota ±0,00 a proiectului. Dimensiunile din plan și din secțiuni sunt în centimetri (cm), dacă nu se specifică altfel.
+
+Cota de fundare se confirmă la recepția terenului de fundare, de către geotehnicianul proiectului, prin proces-verbal de recepție a terenului de fundare, înainte de turnarea betonului.
+
+Ultimul strat de pământ, de 20-30 cm grosime deasupra cotei de fundare, se sapă manual, imediat înainte de turnarea betonului de egalizare sau a fundației.
+
+Apele din precipitații sau din infiltrații se evacuează din săpătură (rigole, bașe de colectare, pompare); nu se toarnă beton în apă stagnantă și nu se lasă terenul de fundare să se înmoaie.
+
+Săpăturile cu pereți verticali mai adânci decât adâncimea admisă fără sprijinire (conform studiului geotehnic și normelor de protecția muncii) se execută numai cu sprijiniri.
+
+Taluzurile se protejează împotriva eroziunii și a degradării (folie, dirijarea apelor de suprafață); pantele taluzurilor sunt cele din studiul geotehnic.
+
+Înainte de începerea săpăturii, rețelele edilitare existente se identifică, se marchează pe teren și se protejează; în zona rețelelor, săpătura se execută manual.
+
+Pământul rezultat din săpătură și materialele se depozitează la distanță față de marginea săpăturii (cel puțin distanța prevăzută în studiul geotehnic și în normele de protecția muncii), fără a încărca taluzurile.
