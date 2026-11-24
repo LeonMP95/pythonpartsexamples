@@ -6,3 +6,4 @@
 | stalpi-ec2.md | SR EN 1992-1-1 5.2, 5.8, 6.1, 6.2, 8.2, 8.4, 8.7, 9.5 | NEVALIDAT | - |
 | stalpi-p100.md | P100-1/2013 cap. 5 (stâlpi) | NEVALIDAT | - |
 | model-calcul-p100.md | P100-1/2013 cap. 3-4, CR 0-2012, SR EN 1992-1-1 (convenții pentru modelul de calcul ETABS) | NEVALIDAT | - |
+| sapatura.md | normativul de terasamente (de identificat), NP 112-2014, NP 120-2014, NP 074-2022, STAS 6054 | NEVALIDAT | - |
